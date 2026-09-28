@@ -1,0 +1,10 @@
+.venv/
+.state/
+Загрузки/
+__pycache__/
+*.pyc
+extension/config.js
+*.log
+.DS_Store
+dist/
+.pytest_cache/

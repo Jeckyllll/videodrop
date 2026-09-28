@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ru">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>VideoDrop — скачать видео</title><link rel="stylesheet" href="/style.css"><link rel="stylesheet" href="/youtube-ui.css"></head>
+<body>
+<header><a class="brand" href="/" aria-label="VideoDrop, главная"><span class="logo">↓</span> VideoDrop</a><span class="local"><i></i> На вашем Mac</span></header>
+<main>
+  <div class="intro"><span class="eyebrow">ВИДЕО С СОБОЙ</span><h1>Ссылка. Качество.<br><span>Готово.</span></h1><p>YouTube, Vimeo и видео из ваших уроков.<br>Сохраняйте на компьютер в пару кликов.</p></div>
+  <section class="card" aria-label="Скачивание видео">
+    <form id="lookup"><label for="url">Ссылка на видео или урок</label><div class="input-row"><input id="url" type="url" autocomplete="off" required placeholder="https://youtube.com/watch?v=…"><button id="find" type="submit">Найти видео <span>→</span></button></div>
+      <details class="advanced"><summary>Видео из закрытого урока</summary><p>Откройте урок в Chrome и нажмите расширение VideoDrop. Оно найдёт встроенные плееры и передаст выбранное видео сюда.</p><label for="referer">Адрес урока, если вставили ссылку на плеер</label><input id="referer" type="url" placeholder="https://edu.rmes-online.ru/student/lessons/…"><p class="small">Если плеер не найден, в расширении нажмите «Найти потоки», затем запустите видео.</p></details>
+    </form>
+    <div id="youtube-settings"></div>
+    <div id="notice" role="status" aria-live="polite" hidden></div>
+    <section id="result" hidden>
+      <div class="video-head"><span class="video-icon">▶</span><div><span id="video-meta" class="small"></span><h2 id="video-title"></h2></div></div>
+      <div class="choices"><div><label for="quality">Разрешение</label><select id="quality"><option value="0">Лучшее доступное</option></select></div><div><label for="format">Формат файла</label><select id="format"><option value="mp4">MP4 · видео</option><option value="mkv">MKV · видео</option><option value="mp3">MP3 · только звук</option><option value="m4a">M4A · только звук</option></select></div><button id="download">Скачать <span>↓</span></button></div>
+      <p id="format-hint" class="small">Исходное качество, без увеличения разрешения. Видео и звук объединяются автоматически.</p>
+    </section>
+  </section>
+  <div class="under"><span>На Mac и в вашем YouTube · доступ по ссылке</span><button class="text-button" id="folder">Открыть загрузки ↗</button></div>
+  <section id="downloads-section" hidden><div class="section-heading"><h2>Загрузки</h2><span class="small">Эту страницу можно закрыть. Вкладку YouTube Studio оставьте открытой.</span></div><div id="jobs" aria-live="polite"></div></section>
+  <section class="chrome-card"><div class="chrome-icon">↗</div><div><h2>Видео внутри урока?</h2><p>Кнопка в Chrome найдёт его на открытой странице.</p></div><button id="extension-help" class="secondary">Подключить к Chrome</button></section>
+  <section id="help" class="card help" hidden><h2>Один раз подключите расширение</h2><ol><li>Откройте в Chrome <strong>chrome://extensions</strong> и включите «Режим разработчика».</li><li>Нажмите «Загрузить распакованное расширение» и выберите эту папку:<code id="extension-path"></code><button id="extension-folder" class="text-button">Показать папку ↗</button></li><li>Закрепите VideoDrop в панели расширений. Откройте урок → VideoDrop → выберите видео.</li></ol><p class="small">По умолчанию расширение читает только страницу, на которой вы его открыли. Поиск потоков и передача входа включаются отдельно. DRM не поддерживается.</p></section>
+  <details id="updates-panel" class="updates-panel">
+    <summary>Обновления VideoDrop <span id="app-version"></span><span id="update-badge"></span></summary>
+    <p id="update-status" class="small" role="status" aria-live="polite">Проверяем настройки…</p>
+    <label class="update-toggle"><input id="update-auto" type="checkbox">Обновлять автоматически, когда нет активных загрузок</label>
+    <div class="update-actions"><button id="update-check" class="secondary">Проверить обновления</button><button id="update-install" hidden>Установить обновление</button><button id="update-rollback" class="text-button" hidden>Вернуть предыдущую версию</button></div>
+    <p id="update-extension" class="small" hidden>Обновите расширение: откройте <strong>chrome://extensions</strong> и нажмите ↻ на карточке VideoDrop. Папку выбирать заново не нужно.</p>
+    <p class="small">Настройки и видео сохраняются. <a id="update-source" target="_blank" rel="noopener noreferrer">Версии на GitHub ↗</a></p>
+  </details>
+  <footer><span>VideoDrop / локально и просто</span><span>YouTube · Vimeo · MP4 · HLS · DASH</span></footer>
+</main><script src="/youtube-ui.js" defer></script><script src="/app.js" defer></script></body></html>
