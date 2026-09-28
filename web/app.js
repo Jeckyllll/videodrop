@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 let token = '', studioExtensionId = '', current = null, inspecting = '', pollBusy = false, youtubeControls;
-let updateBusy=false, updateRestarting=false, loadedVersion='', restartStarted=0;
+let updateBusy=false, updateRestarting=false, loadedVersion='', restartStarted=0, downloadsOnly=false;
 const completed = new Set();
 const opening = new Set();
 function wakeStudio(extensionId=studioExtensionId){if(extensionId&&window.chrome?.runtime?.sendMessage)try{chrome.runtime.sendMessage(extensionId,{type:'studio-pump',token},()=>{void chrome.runtime.lastError;});}catch{}}
@@ -69,17 +69,17 @@ function renderJobs(jobs) {
         finally{opening.delete(job.id);open.disabled=false;open.textContent=label;}
       };root.append(open);
     }
-    if(job.result?.youtubeId&&/^[a-zA-Z0-9_-]{11}$/.test(job.result.youtubeId)){
+    if(!downloadsOnly&&job.result?.youtubeId&&/^[a-zA-Z0-9_-]{11}$/.test(job.result.youtubeId)){
       const link=document.createElement('a');link.className=job.result.localKept?'text-button youtube-link':'open-video';
       link.textContent='Открыть на YouTube';link.href='https://youtu.be/'+job.result.youtubeId;
       link.target='_blank';link.rel='noopener noreferrer';root.append(link);
     }
-    if(job.storage?.provider==='studio'&&job.storage.enabled&&!job.result?.youtubeVerified&&job.result?.localKept){
+    if(!downloadsOnly&&job.storage?.provider==='studio'&&job.storage.enabled&&!job.result?.youtubeVerified&&job.result?.localKept){
       const studio=document.createElement('a');studio.className='text-button youtube-link';studio.textContent='Открыть YouTube Studio';
       studio.href=job.result.youtubeId&&/^[a-zA-Z0-9_-]{11}$/.test(job.result.youtubeId)?'https://studio.youtube.com/video/'+job.result.youtubeId+'/edit':'https://studio.youtube.com/';
       studio.target='_blank';studio.rel='noopener noreferrer';root.append(studio);
     }
-    if(['done','error','cancelled'].includes(job.status)&&job.result?.localKept&&['mp4','mkv'].includes(job.format)&&!job.result.youtubeVerified&&!job.retrying&&!job.uploading&&!job.studioNeedsReview){
+    if(!downloadsOnly&&['done','error','cancelled'].includes(job.status)&&job.result?.localKept&&['mp4','mkv'].includes(job.format)&&!job.result.youtubeVerified&&!job.retrying&&!job.uploading&&!job.studioNeedsReview){
       const retry=document.createElement('button');retry.className='text-button';
       retry.textContent=job.result.youtubeId?'Проверить YouTube':job.storage?.enabled?'Продолжить через Chrome':'Загрузить на YouTube';
       retry.onclick=async()=>{retry.disabled=true;try{
@@ -117,7 +117,7 @@ function renderUpdates(value){
   const busy=['checking','downloading','preparing','restarting'].includes(value.phase);
   const checked=value.checkedAt?new Date(value.checkedAt*1000).toLocaleString('ru-RU'):'';
   let message=value.message|| (value.available?'Доступна новая версия '+value.latestVersion+'.':checked?'Установлена актуальная версия. Проверено: '+checked:'Наличие обновлений ещё не проверено.');
-  if(value.pending&&!busy)message='Обновление ожидает завершения скачиваний и отправок на YouTube.';
+  if(value.pending&&!busy)message='Обновление ожидает завершения текущих загрузок.';
   $('update-status').textContent=message;
   $('update-status').classList.toggle('update-error',!busy&&value.result?.ok===false);
   $('update-check').disabled=busy;
@@ -152,7 +152,8 @@ function updateHash(){if(location.hash==='#updates'){$('updates-panel').open=tru
 window.addEventListener('hashchange',()=>{readHash();poll();updateHash();});
 (async()=>{try{
   const config=await api('bootstrap');token=config.token;$('extension-path').textContent=config.extension;
-  youtubeControls=await new VideoDropYouTube($('youtube-settings'),{request:api,wake:wakeStudio,
+  downloadsOnly=config.edition==='lite';
+  youtubeControls=downloadsOnly?{options:async()=>({provider:'local',enabled:false,deleteLocal:false}),set(){},refresh(){}}:await new VideoDropYouTube($('youtube-settings'),{request:api,wake:wakeStudio,
     load:async()=>JSON.parse(localStorage.getItem('studioOptions')||'null'),
     save:async value=>{localStorage.removeItem('cloudOptions');localStorage.removeItem('youtubeOptions');localStorage.setItem('studioOptions',JSON.stringify(value));}}).init();
   readHash();await poll();await pollUpdates();updateHash();setInterval(poll,1000);setInterval(pollUpdates,2000);

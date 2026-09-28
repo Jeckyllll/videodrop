@@ -35,7 +35,7 @@ window.VideoDropYouTube=class VideoDropYouTube {
     this.get('account').textContent=this.account.connected?'Канал: '+this.account.channelTitle:'Канал ещё не подключён';
     this.get('connect').textContent=this.account.connecting?'Ждём Chrome…':this.account.connected?'Сменить канал':'Подключить Chrome';
     this.get('connect').disabled=!!this.account.connecting;this.get('disconnect').hidden=!this.account.connected;
-    this.get('connection').textContent=this.account.ready?'Расширение Chrome на связи.':'Откройте расширение VideoDrop 1.3 в Chrome. После обновления подтвердите разрешение «Отладчик».';
+    this.get('connection').textContent=this.account.ready?'Расширение Chrome на связи.':'Откройте расширение VideoDrop в Chrome. После обновления подтвердите разрешение «Отладчик».';
     this.get('hint').textContent=this.value.enabled?'Удаление — только после обработки ролика и проверки доступа «По ссылке». При ошибке файл останется на Mac.':'Локальная копия остаётся на Mac.';
   }
   accept(account){

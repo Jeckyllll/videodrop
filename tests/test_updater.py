@@ -17,6 +17,7 @@ import updater
 from scripts.build_release import build
 
 ROOT = Path(__file__).resolve().parents[1]
+VERSION = updater.read_json(ROOT / 'version.json')['version']
 
 
 class PackageTests(unittest.TestCase):
@@ -34,7 +35,7 @@ class PackageTests(unittest.TestCase):
             self.assertNotIn('extension/config.js', names)
             self.assertFalse(any(n.startswith(('.state/', '.venv/', 'Загрузки/', 'tests/')) for n in names))
         stage = self.root / 'program'
-        files = updater.unpack_package(self.package, stage, '1.4.0', 'Jeckyllll/videodrop')
+        files = updater.unpack_package(self.package, stage, VERSION, 'Jeckyllll/videodrop')
         self.assertEqual(set(files), set(updater.program_files(ROOT)))
         self.assertEqual((stage / 'app.py').read_bytes(), (ROOT / 'app.py').read_bytes())
         self.assertTrue((stage / 'Запустить VideoDrop.command').stat().st_mode & stat.S_IXUSR)
@@ -47,7 +48,7 @@ class PackageTests(unittest.TestCase):
                 with zipfile.ZipFile(path, 'a') as z:
                     z.writestr(name, 'malicious')
                 with self.assertRaises(ValueError):
-                    updater.unpack_package(path, self.root / 'absent', '1.4.0', 'Jeckyllll/videodrop')
+                    updater.unpack_package(path, self.root / 'absent', VERSION, 'Jeckyllll/videodrop')
                 self.assertFalse((self.root / 'absent').exists())
         path = self.root / 'symlink.zip'
         with zipfile.ZipFile(path, 'w') as z:
@@ -55,10 +56,10 @@ class PackageTests(unittest.TestCase):
             z.writestr(item, '/tmp/escape')
             z.writestr('release-manifest.json', '{}')
         with self.assertRaises(ValueError):
-            updater.unpack_package(path, self.root / 'absent', '1.4.0', 'Jeckyllll/videodrop')
+            updater.unpack_package(path, self.root / 'absent', VERSION, 'Jeckyllll/videodrop')
 
     def test_wrong_version_repository_or_checksum_rejected(self):
-        for version, repository in [('1.4.1', 'Jeckyllll/videodrop'), ('1.4.0', 'other/repo')]:
+        for version, repository in [('99.0.0', 'Jeckyllll/videodrop'), (VERSION, 'other/repo')]:
             with self.assertRaises(ValueError):
                 updater.unpack_package(self.package, self.root / 'absent', version, repository)
         bad = self.root / 'bad.zip'
@@ -66,7 +67,7 @@ class PackageTests(unittest.TestCase):
             for name in source.namelist():
                 dest.writestr(name, b'corrupt' if name == 'worker.py' else source.read(name))
         with self.assertRaises(ValueError):
-            updater.unpack_package(bad, self.root / 'absent', '1.4.0', 'Jeckyllll/videodrop')
+            updater.unpack_package(bad, self.root / 'absent', VERSION, 'Jeckyllll/videodrop')
         self.assertFalse((self.root / 'absent').exists())
 
     def test_github_metadata_pins_repository_asset_version_and_digest(self):
@@ -84,8 +85,8 @@ class PackageTests(unittest.TestCase):
 
     def test_replace_and_restore_preserve_credentials_history_downloads_and_remove_new_files(self):
         target = self.root / 'installed'; stage = self.root / 'stage'; backup = self.root / 'backup'
-        updater.unpack_package(self.package, target, '1.4.0', 'Jeckyllll/videodrop')
-        updater.unpack_package(self.package, stage, '1.4.0', 'Jeckyllll/videodrop')
+        updater.unpack_package(self.package, target, VERSION, 'Jeckyllll/videodrop')
+        updater.unpack_package(self.package, stage, VERSION, 'Jeckyllll/videodrop')
         for name in ('.state/token', '.state/studio-jobs.json', 'extension/config.js', 'Загрузки/урок.mp4'):
             path = target / name; path.parent.mkdir(parents=True, exist_ok=True); path.write_bytes(b'private')
         old = updater.snapshot(target, backup)

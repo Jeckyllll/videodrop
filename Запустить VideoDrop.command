@@ -17,24 +17,26 @@ if [[ ! -x .venv/bin/python ]]; then
   .venv/bin/python -m pip install --disable-pip-version-check -r requirements.txt
 fi
 mkdir -p .state
-if ! /usr/bin/curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:8765/api/bootstrap >/dev/null 2>&1; then
+VIDEODROP_PORT_VALUE="$(.venv/bin/python -c 'import json; print(json.load(open("version.json")).get("port", 8765))')"
+VIDEODROP_BASE="http://127.0.0.1:$VIDEODROP_PORT_VALUE"
+if ! /usr/bin/curl --noproxy '*' -fsS --max-time 2 "$VIDEODROP_BASE/api/bootstrap" >/dev/null 2>&1; then
   if [[ -f .state/updates/runner.py ]]; then
     .venv/bin/python .state/updates/runner.py --recover "$PWD"
   fi
   VIDEODROP_PYTHON="$(.venv/bin/python updater.py --runtime "$PWD")"
-  if ! /usr/bin/curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:8765/api/bootstrap >/dev/null 2>&1; then
+  if ! /usr/bin/curl --noproxy '*' -fsS --max-time 2 "$VIDEODROP_BASE/api/bootstrap" >/dev/null 2>&1; then
     nohup "$VIDEODROP_PYTHON" app.py >.state/server.log 2>&1 </dev/null &!
   fi
   for attempt in {1..40}; do
-    if /usr/bin/curl --noproxy '*' -fsS --max-time 1 http://127.0.0.1:8765/api/bootstrap >/dev/null 2>&1; then break; fi
+    if /usr/bin/curl --noproxy '*' -fsS --max-time 1 "$VIDEODROP_BASE/api/bootstrap" >/dev/null 2>&1; then break; fi
     sleep 0.25
   done
 fi
-if /usr/bin/curl --noproxy '*' -fsS --max-time 2 http://127.0.0.1:8765/api/bootstrap >/dev/null 2>&1; then
+if /usr/bin/curl --noproxy '*' -fsS --max-time 2 "$VIDEODROP_BASE/api/bootstrap" >/dev/null 2>&1; then
   if [[ "${1:-}" == '--updates' ]]; then
-    open -a 'Google Chrome' 'http://127.0.0.1:8765/#updates'
+    open -a 'Google Chrome' "$VIDEODROP_BASE/#updates"
   else
-    open -a 'Google Chrome' http://127.0.0.1:8765/
+    open -a 'Google Chrome' "$VIDEODROP_BASE/"
   fi
   echo 'VideoDrop открыт в Chrome. Это окно можно закрыть.'
 else

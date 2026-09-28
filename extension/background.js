@@ -1,4 +1,18 @@
-importScripts('studio-driver.js');
+importScripts('edition.js');
+if (VIDEODROP_EDITION === 'full') {
+  importScripts('studio-driver.js');
+} else {
+  importScripts('config.js');
+  const ping = async () => {
+    try {
+      await fetch(VIDEODROP.base + '/api/extension/heartbeat', {method:'POST',
+        headers:{'Content-Type':'application/json','X-VideoDrop-Token':VIDEODROP.token,'X-VideoDrop-Extension':chrome.runtime.id},
+        body:JSON.stringify({edition:VIDEODROP_EDITION,version:chrome.runtime.getManifest().version}),signal:AbortSignal.timeout(5000)});
+    } catch {}
+  };
+  chrome.runtime.onMessage.addListener(message => { if(message.type === 'extension-ping')ping(); });
+  ping();
+}
 // Observes media only in a tab explicitly armed by the user. Nothing is sent automatically.
 const mediaType = /(?:application\/(?:vnd\.apple\.mpegurl|x-mpegurl|dash\+xml)|video\/(?:mp4|webm))/i;
 const mediaURL = /\.(m3u8|mpd|mp4|webm)(?:[?#]|$)/i;

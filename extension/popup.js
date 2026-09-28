@@ -75,6 +75,11 @@ $('capture').onclick=async()=>{
 };
 $('open').onclick=()=>chrome.tabs.create({url:VIDEODROP.base});
 (async()=>{
+  if(VIDEODROP_EDITION === 'lite'){
+    youtubeControls={options:async()=>({provider:'local',enabled:false,deleteLocal:false})};
+    chrome.runtime.sendMessage({type:'extension-ping'});
+    await init();return;
+  }
   chrome.runtime.sendMessage({type:'studio-pump'});
   youtubeControls=await new VideoDropYouTube($('youtube-settings'),{request:localAPI,wake:()=>chrome.runtime.sendMessage({type:'studio-pump'}),
     load:async()=>(await chrome.storage.local.get('studioOptions')).studioOptions,

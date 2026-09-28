@@ -20,6 +20,9 @@ import uuid
 import zipfile
 
 ASSET = 'VideoDrop-mac.zip'
+ASSETS = {'full': ASSET, 'lite': 'VideoDrop-Lite-mac.zip'}
+UPLOAD_FILES = {'studio.py', 'extension/studio-driver.js', 'extension/studio-page.js',
+                'extension/youtube-ui.js', 'extension/youtube-ui.css'}
 MAX_ARCHIVE = 40 * 1024 * 1024
 MAX_EXPANDED = 100 * 1024 * 1024
 TOP_FILES = {'app.py', 'worker.py', 'studio.py', 'updater.py', 'version.json',
@@ -27,6 +30,17 @@ TOP_FILES = {'app.py', 'worker.py', 'studio.py', 'updater.py', 'version.json',
 REQUIRED = TOP_FILES | {'web/index.html', 'web/app.js', 'web/style.css', 'extension/manifest.json',
                         'extension/background.js', 'extension/studio-driver.js', 'extension/studio-page.js'}
 BUSY_STATES = {'checking', 'downloading', 'preparing', 'restarting'}
+
+
+def edition_of(config):
+    edition = config.get('edition', 'full')
+    if edition not in ASSETS:
+        raise ValueError('Неизвестная редакция VideoDrop.')
+    return edition
+
+
+def required_files(edition):
+    return (REQUIRED - UPLOAD_FILES if edition == 'lite' else REQUIRED) | {'extension/edition.js'}
 
 
 def read_json(path, default=None):
@@ -139,7 +153,7 @@ def github_fetch(url, limit, target=None):
         raise ValueError('Не удалось связаться с GitHub. Проверьте интернет; текущая версия работает.') from None
 
 
-def latest_release(repository):
+def latest_release(repository, edition='full'):
     if not re.fullmatch(r'[A-Za-z0-9-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('Не настроен репозиторий обновлений.')
     release = json.loads(github_fetch(f'https://api.github.com/repos/{repository}/releases/latest', 2 * 1024 * 1024))
@@ -147,17 +161,18 @@ def latest_release(repository):
     version_tuple(version)
     if release.get('draft') or release.get('prerelease'):
         raise ValueError('Эта версия ещё не готова для установки.')
-    asset = next((a for a in release.get('assets', []) if a.get('name') == ASSET), {})
+    asset_name = ASSETS[edition]
+    asset = next((a for a in release.get('assets', []) if a.get('name') == asset_name), {})
     digest = asset.get('digest', '')
     url = asset.get('browser_download_url', '')
-    expected = f'https://github.com/{repository}/releases/download/v{version}/{ASSET}'
+    expected = f'https://github.com/{repository}/releases/download/v{version}/{asset_name}'
     if url != expected or not re.fullmatch(r'sha256:[a-f0-9]{64}', digest or '') or not 0 < asset.get('size', 0) <= MAX_ARCHIVE:
         raise ValueError('В релизе нет проверяемого установочного пакета VideoDrop для Mac.')
-    return {'version': version, 'url': url, 'sha256': digest[7:], 'size': asset['size'],
+    return {'version': version, 'edition': edition, 'url': url, 'sha256': digest[7:], 'size': asset['size'],
             'releaseUrl': f'https://github.com/{repository}/releases/tag/v{version}'}
 
 
-def unpack_package(archive, destination, version, repository):
+def unpack_package(archive, destination, version, repository, edition='full'):
     """Validate the complete ZIP before writing anything into the staging directory."""
     with zipfile.ZipFile(archive) as bundle:
         entries = bundle.infolist()
@@ -172,13 +187,17 @@ def unpack_package(archive, destination, version, repository):
                 raise ValueError('В обновлении есть недопустимый файл.')
         manifest = json.loads(bundle.read('release-manifest.json'))
         hashes = manifest.get('files', {})
-        if manifest.get('version') != version or not isinstance(hashes, dict) or set(names) != set(hashes) | {'release-manifest.json'} or not REQUIRED <= set(hashes):
+        if (manifest.get('version') != version or edition_of(manifest) != edition or not isinstance(hashes, dict)
+                or set(names) != set(hashes) | {'release-manifest.json'} or not required_files(edition) <= set(hashes)):
             raise ValueError('Неполный пакет обновления.')
+        if edition == 'lite' and set(hashes) & UPLOAD_FILES:
+            raise ValueError('Пакет Lite не должен содержать отправку в облако.')
         for name, expected in hashes.items():
             if not re.fullmatch(r'[a-f0-9]{64}', expected) or hashlib.sha256(bundle.read(name)).hexdigest() != expected:
                 raise ValueError('Контрольная сумма файла не совпала.')
         config = json.loads(bundle.read('version.json'))
-        if config.get('version') != version or config.get('repository') != repository or config.get('asset') != ASSET:
+        if (config.get('version') != version or config.get('repository') != repository
+                or edition_of(config) != edition or config.get('asset') != ASSETS[edition]):
             raise ValueError('Обновление предназначено для другой программы.')
         for name in hashes:
             target = safe_target(destination, name)
@@ -320,6 +339,7 @@ class Updater:
         self.persist, self.stop, self.busy = persist, stop, busy
         self.state = self.root / '.state' / 'updates'
         self.config = read_json(self.root / 'version.json')
+        self.edition = edition_of(self.config)
         self.version = self.config.get('version', '1.4.0')
         self.settings = read_json(self.state / 'settings.json', {'automatic': True})
         self.cache = read_json(self.state / 'check.json')
@@ -332,7 +352,7 @@ class Updater:
             previous = read_json(self.state / 'previous.json')
             latest = self.cache.get('latest') or {}
             available = bool(latest and version_tuple(latest['version']) > version_tuple(self.version))
-            return {'version': self.version, 'repository': self.config.get('repository', ''),
+            return {'version': self.version, 'edition': self.edition, 'repository': self.config.get('repository', ''),
                     'automatic': self.settings.get('automatic', True), 'phase': self.phase,
                     'message': self.message or self.cache.get('error') or result.get('message', ''),
                     'checkedAt': self.cache.get('checkedAt'), 'available': available,
@@ -367,7 +387,7 @@ class Updater:
 
     def _check(self):
         try:
-            latest = latest_release(self.config.get('repository', ''))
+            latest = latest_release(self.config.get('repository', ''), self.edition)
             value = {'checkedAt': time.time(), 'latest': latest}
         except Exception as error:
             value = {'checkedAt': time.time(), 'error': str(error) if isinstance(error, ValueError)
@@ -386,12 +406,14 @@ class Updater:
                 previous = read_json(self.state / 'previous.json')
                 if not previous.get('folder') or not Path(previous['folder']).is_dir():
                     raise ValueError('Предыдущая версия пока не сохранена.')
+                if edition_of(read_json(Path(previous['folder']) / 'version.json')) != self.edition:
+                    raise ValueError('Предыдущая версия относится к другой редакции VideoDrop.')
                 self.pending = 'rollback'
             elif self.status()['available']:
                 self.pending = True
             else:
                 raise ValueError('Сначала проверьте наличие новой версии.')
-            self.message = 'Обновление начнётся после завершения загрузок и отправок на YouTube.'
+            self.message = 'Обновление начнётся после завершения текущих загрузок.'
         return self.status()
 
     def tick(self):
@@ -419,6 +441,8 @@ class Updater:
             if rollback:
                 previous = read_json(self.state / 'previous.json')
                 stage, files, version, python = Path(previous['folder']), previous['files'], previous['version'], previous['python']
+                if edition_of(read_json(stage / 'version.json')) != self.edition:
+                    raise ValueError('Нельзя восстановить другую редакцию VideoDrop.')
             else:
                 latest = self.cache['latest']
                 folder = self.state / ('stage-' + uuid.uuid4().hex)
@@ -428,7 +452,7 @@ class Updater:
                 if archive.stat().st_size != latest['size'] or sha256(archive) != latest['sha256']:
                     raise ValueError('Контрольная сумма архива не совпала. Обновление отменено.')
                 stage, version = folder / 'program', latest['version']
-                files = unpack_package(archive, stage, version, self.config['repository'])
+                files = unpack_package(archive, stage, version, self.config['repository'], self.edition)
                 python = sys.executable
                 with self.lock:
                     self.phase, self.message = 'preparing', 'Проверяем новую версию…'
@@ -437,8 +461,8 @@ class Updater:
                     run_checked([sys.executable, '-m', 'venv', str(env)], self.root)
                     python = str(env / 'bin' / 'python')
                     run_checked([python, '-m', 'pip', 'install', '--disable-pip-version-check', '-r', str(stage / 'requirements.txt')], self.root)
-                run_checked([python, '-c', 'import app, worker, updater; import py_compile; '
-                             '[py_compile.compile(p, doraise=True) for p in ("app.py", "worker.py", "studio.py", "updater.py")]'], stage)
+                run_checked([python, '-c', 'import app, worker, updater; import py_compile; from pathlib import Path; '
+                             '[py_compile.compile(str(p), doraise=True) for p in Path(".").glob("*.py")]'], stage)
             with self.lock:
                 # Check again: new tasks may have arrived while the archive was downloading.
                 active = any(j.get('status') in ('queued', 'working') or j.get('process') for j in self.jobs.values()) or self.busy()
@@ -450,7 +474,7 @@ class Updater:
                 from_config = read_json(self.root / 'version.json')
                 plan = {'pid': os.getpid(), 'stage': str(stage), 'newFiles': files, 'version': version,
                         'oldVersion': from_config['version'], 'python': python, 'oldPython': sys.executable,
-                        'base': 'http://127.0.0.1:' + os.environ.get('VIDEODROP_PORT', '8765'),
+                        'base': 'http://127.0.0.1:' + os.environ.get('VIDEODROP_PORT', str(self.config.get('port', 8765))),
                         'token': (self.root / '.state' / 'token').read_text().strip(), 'rollback': rollback}
                 plan_path = self.state / 'handoff.json'
                 write_json(plan_path, plan)

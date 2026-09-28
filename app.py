@@ -18,13 +18,15 @@ import threading
 import time
 from urllib.parse import urlsplit
 import uuid
-import studio
 import updater
 
 ROOT = Path(__file__).resolve().parent
+CONFIG = updater.read_json(ROOT / 'version.json')
+EDITION = updater.edition_of(CONFIG)
+UPLOADS_ENABLED = EDITION == 'full'
 STATE = ROOT / ".state"
 DOWNLOADS = ROOT / "Загрузки"
-PORT = int(os.environ.get("VIDEODROP_PORT", "8765"))
+PORT = int(os.environ.get("VIDEODROP_PORT", str(CONFIG.get('port', 8765))))
 BASE = f"http://127.0.0.1:{PORT}"
 TOKEN = ""
 LOCK = threading.RLock()
@@ -32,7 +34,48 @@ SOURCES = {}
 JOBS = {}
 DOWNLOAD_QUEUE = ThreadPoolExecutor(max_workers=1)
 INSPECT_QUEUE = ThreadPoolExecutor(max_workers=2)
-STUDIO = studio.Broker(JOBS, LOCK, STATE, DOWNLOADS)
+
+class DownloadHistory:
+    """Lite has local download history, with no uploader module or account connection."""
+    def __init__(self):
+        self.extension = {}
+        self.connect_request = None
+
+    def settings(self, value):
+        if value is not None and (not isinstance(value, dict) or value.get('enabled') or value.get('deleteLocal')):
+            raise ValueError('VideoDrop Lite сохраняет файлы только на компьютер.')
+        return {'provider': 'local', 'enabled': False, 'deleteLocal': False}
+
+    def persist(self):
+        with LOCK:
+            fields = ('id', 'kind', 'status', 'created', 'title', 'format', 'height', 'result', 'stage', 'error')
+            jobs = [{key: job[key] for key in fields if key in job} for job in JOBS.values()
+                    if job.get('kind') == 'download' and job.get('result')]
+            updater.write_json(STATE / 'downloads.json', jobs[-100:])
+
+    def restore(self):
+        with LOCK:
+            for job in updater.read_json(STATE / 'downloads.json', []):
+                if not isinstance(job, dict) or not isinstance(job.get('id'), str):
+                    continue
+                job.update(cancel=False, storage=self.settings(None))
+                job['result'] = {k: v for k, v in job.get('result', {}).items() if k in ('filename', 'size', 'localKept')}
+                if job.get('status') in ('queued', 'working'):
+                    job.update(status='error', error='Скачивание прервано перезапуском. Начните его заново.')
+                JOBS[job['id']] = job
+
+    def cancel(self, job):
+        self.persist()
+
+    def maintenance(self):
+        pass
+
+
+if UPLOADS_ENABLED:
+    import studio
+    STUDIO = studio.Broker(JOBS, LOCK, STATE, DOWNLOADS)
+else:
+    STUDIO = DownloadHistory()
 UPDATES = None
 
 
@@ -92,7 +135,7 @@ def open_download(job_id):
             raise ValueError("Готовый файл ещё не доступен.")
         result = job.get("result", {})
         if not result.get("localKept"):
-            raise ValueError("Локальная копия не сохранена. Используйте кнопку «Открыть на YouTube».")
+            raise ValueError("Локальная копия не сохранена." + (" Используйте кнопку «Открыть на YouTube»." if UPLOADS_ENABLED else ""))
         filename = result.get("filename", "")
     # Only a completed media file belonging to this job can be opened, never a client-supplied path.
     if not filename or Path(filename).name != filename or Path(filename).suffix.lower() not in (".mp4", ".mkv", ".mp3", ".m4a"):
@@ -184,6 +227,7 @@ def work(job, request):
                 elif message["event"] == "error":
                     error = message["message"]
         code = process.wait()
+        process.stdout.close()
         with LOCK:
             job.pop("process", None)
             if job["cancel"]:
@@ -284,14 +328,17 @@ class Handler(BaseHTTPRequestHandler):
             # No cross-origin bootstrap: only the local UI can read the pairing secret.
             if self.headers.get("Origin", BASE) not in (BASE, f"http://localhost:{PORT}") or self.headers.get("Sec-Fetch-Site") == "cross-site":
                 return self.respond(403, {"error": "Доступ запрещён"})
-            return self.respond(200, {"token": TOKEN, "downloads": str(DOWNLOADS), "extension": str(ROOT / "extension")})
+            return self.respond(200, {"token": TOKEN, "downloads": str(DOWNLOADS), "extension": str(ROOT / "extension"),
+                                      "edition": EDITION, "youtubeUpload": UPLOADS_ENABLED})
         if path.startswith("/api/"):
             if not self.authorized():
                 return self.respond(403, {"error": "Нет локального ключа приложения. Перезапустите VideoDrop и перезагрузите расширение."})
+            if not UPLOADS_ENABLED and path.startswith('/api/studio/'):
+                return self.respond(404, {"error": "В VideoDrop Lite доступно только скачивание."})
             if path == "/api/studio/status":
                 return self.respond(200, STUDIO.status())
             if path == "/api/health":
-                return self.respond(200, {"version": UPDATES.version if UPDATES else "1.4.0", "pid": os.getpid()})
+                return self.respond(200, {"version": UPDATES.version if UPDATES else CONFIG['version'], "pid": os.getpid(), "edition": EDITION})
             if path == "/api/updates":
                 value = UPDATES.status() if UPDATES else {}
                 installed = json.loads((ROOT / "extension" / "manifest.json").read_text())["version"]
@@ -311,6 +358,8 @@ class Handler(BaseHTTPRequestHandler):
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                   "/style.css": ("style.css", "text/css; charset=utf-8")}
         if path in ("/youtube-ui.js", "/youtube-ui.css"):
+            if not UPLOADS_ENABLED:
+                return self.respond(404, {"error": "Не найдено"})
             mime = "text/javascript; charset=utf-8" if path.endswith(".js") else "text/css; charset=utf-8"
             return self.respond(200, (ROOT / "extension" / path[1:]).read_bytes(), mime)
         if path in assets:
@@ -329,6 +378,23 @@ class Handler(BaseHTTPRequestHandler):
             if not isinstance(data, dict):
                 raise ValueError("Некорректный запрос")
             path = urlsplit(self.path).path
+            if not UPLOADS_ENABLED and (path.startswith('/api/studio/') or path == '/api/upload-youtube'):
+                return self.respond(404, {"error": "В VideoDrop Lite доступно только скачивание."})
+            if path == '/api/extension/heartbeat':
+                extension_id = self.headers.get('X-VideoDrop-Extension', '')
+                origin = self.headers.get('Origin', '')
+                if not re.fullmatch(r'[a-p]{32}', extension_id) or origin and origin != 'chrome-extension://' + extension_id:
+                    return self.respond(403, {"error": "Нужно расширение VideoDrop."})
+                version = str(data.get('version', ''))
+                if not re.fullmatch(r'\d+\.\d+\.\d+', version) or data.get('edition') != EDITION:
+                    raise ValueError('Расширение относится к другой редакции VideoDrop.')
+                with LOCK:
+                    STUDIO.extension = {'id': extension_id, 'seen': time.time(), 'version': version}
+                    reminder_path = STATE / 'updates' / 'extension.json'
+                    reminder = updater.read_json(reminder_path)
+                    if reminder.get('needsReload') and reminder.get('version') == version:
+                        updater.write_json(reminder_path, {**reminder, 'needsReload': False})
+                return self.respond(200, {'ok': True})
             if path.startswith("/api/updates/"):
                 # Only the local UI can choose when to replace executable program files.
                 if self.headers.get("Origin", BASE) not in (BASE, f"http://localhost:{PORT}"):

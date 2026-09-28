@@ -30,23 +30,30 @@ def main():
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if existing.returncode == 0:
         raise ValueError('Эта версия уже выпущена. Укажите следующий номер в version.json.')
-    archive = build()
+    archives = [build(edition=edition) for edition in updater.ASSETS]
     with tempfile.TemporaryDirectory() as folder:
         notes = Path(folder) / 'notes.md'
         notes.write_text(f'''VideoDrop {version} для macOS.
 
-Скачайте **VideoDrop-mac.zip**, распакуйте в постоянную папку и откройте «Запустить VideoDrop.command».
+**Для сотрудников:** [VideoDrop Lite](https://github.com/{repository}/releases/download/v{version}/VideoDrop-Lite-mac.zip) — скачивание, выбор качества/формата, открытие файлов и автообновление. Без отправки в облако, аккаунтов VideoDrop и доступа к данным владельца.
+
+**Полная версия:** VideoDrop-mac.zip — скачивание и отправка в YouTube через Chrome.
+
+Распакуйте выбранный ZIP в постоянную папку и откройте «Запустить VideoDrop.command».
 Нужен Python 3.10+; для YouTube — Node.js 22+ или Deno. Первое подключение расширения Chrome выполняется вручную.
 
-Установленные копии VideoDrop 1.4+ получат этот выпуск через встроенное обновление.
+Полная версия и Lite получают обновления своей редакции; одна не заменяет другую.
 Настройки, история, входы и видео пользователей в пакет не включены.
 После изменения расширения может потребоваться нажать ↻ в chrome://extensions.
 
 Изменения программы: https://github.com/{repository}/commits/v{version}
 ''')
-        subprocess.run(['gh', 'release', 'create', 'v'+version, str(archive), str(archive.with_suffix('.zip.sha256')),
+        assets = [str(path) for archive in archives for path in (archive, archive.with_suffix('.zip.sha256'))]
+        subprocess.run(['gh', 'release', 'create', 'v'+version, *assets,
                         '--repo', repository, '--target', head, '--title', 'VideoDrop '+version,
-                        '--notes-file', str(notes), '--latest'], cwd=ROOT, check=True)
+                        '--notes-file', str(notes), '--draft'], cwd=ROOT, check=True)
+        subprocess.run(['gh', 'release', 'edit', 'v'+version, '--repo', repository,
+                        '--draft=false', '--latest'], cwd=ROOT, check=True)
 
 
 if __name__ == '__main__':
