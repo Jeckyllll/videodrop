@@ -3,9 +3,9 @@ const fs=require('node:fs'), vm=require('node:vm');
 const {parseHTML}=require('../.state/test-deps/node_modules/linkedom');
 
 test('Lite background loads no Studio driver and only reports its own edition',async()=>{
-  const imports=[],requests=[];
+  const imports=[],requests=[];let listener;
   const context={console,Map,URL,AbortSignal,fetch:async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return {ok:true};},
-    chrome:{runtime:{id:'a'.repeat(32),getManifest:()=>({version:'1.5.0'}),onMessage:{addListener(){}}},
+    chrome:{runtime:{id:'a'.repeat(32),getManifest:()=>({version:'1.5.0'}),onMessage:{addListener(callback){listener=callback;}}},
       webRequest:{onHeadersReceived:{addListener(){}}},tabs:{onRemoved:{addListener(){}},onUpdated:{addListener(){}}}}};
   vm.createContext(context);
   context.importScripts=(name)=>{
@@ -20,6 +20,10 @@ test('Lite background loads no Studio driver and only reports its own edition',a
   assert.equal(requests.length,1);
   assert.equal(requests[0].url,'http://127.0.0.1:8766/api/extension/heartbeat');
   assert.equal(requests[0].body.edition,'lite');
+  let reply;listener({type:'extension-ping'},{id:context.chrome.runtime.id},value=>{reply=value;});
+  assert.equal(reply.ok,true);assert.equal(requests.length,2);
+  listener({type:'extension-ping'},{id:'other-extension'},()=>{throw Error('Unexpected reply');});
+  assert.equal(requests.length,2);
 });
 
 test('Lite popup selects a video without upload controls, stored cloud settings or Studio calls',async()=>{
@@ -28,7 +32,7 @@ test('Lite popup selects a video without upload controls, stored cloud settings 
   const context={console,document,URL,Map,navigator:{userAgent:'test'},window:{close(){}},
     VIDEODROP_EDITION:'lite',VIDEODROP:{base:'http://127.0.0.1:8766',token:'LOCAL'},
     fetch:async(url,options)=>{requests.push({url,body:JSON.parse(options.body)});return {ok:true,json:async()=>({openUrl:'http://127.0.0.1:8766/#job=test'})};},
-    chrome:{runtime:{sendMessage:message=>messages.push(message.type)},
+    chrome:{runtime:{sendMessage:async message=>{messages.push(message.type);return {ok:true};}},
       tabs:{query:async()=>[{id:1,url:'https://lesson.example/video',title:'Lesson'}],create:async value=>tabs.push(value)},
       scripting:{executeScript:async()=>[{result:[{url:'https://media.example/video.mp4',label:'Видео'}]}]},
       storage:{session:{get:async()=>({})},local:{get:()=>{throw Error('Must not read cloud settings');}}}}};

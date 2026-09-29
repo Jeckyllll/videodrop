@@ -10,7 +10,9 @@ if (VIDEODROP_EDITION === 'full') {
         body:JSON.stringify({edition:VIDEODROP_EDITION,version:chrome.runtime.getManifest().version}),signal:AbortSignal.timeout(5000)});
     } catch {}
   };
-  chrome.runtime.onMessage.addListener(message => { if(message.type === 'extension-ping')ping(); });
+  chrome.runtime.onMessage.addListener((message,sender,sendResponse) => {
+    if(sender.id===chrome.runtime.id&&message?.type==='extension-ping'){ping();sendResponse({ok:true});}
+  });
   ping();
 }
 // Observes media only in a tab explicitly armed by the user. Nothing is sent automatically.

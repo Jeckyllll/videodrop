@@ -9,6 +9,16 @@ async function localAPI(path,body){
 const sourcePattern=/\.(mp4|webm|m3u8|mpd)(?:[?#]|$)/i;
 const playerPattern=/https?:\/\/(?:player\.vimeo\.com\/video\/|(?:www\.)?youtube(?:-nocookie)?\.com\/embed\/|rutube\.ru\/play\/embed\/|(?:kinescope\.io|iframe\.mediadelivery\.net|video\.sibnet\.ru|vkvideo\.ru|vk\.com)\/)/i;
 function message(text){$('status').textContent=text;}
+async function wakeBackground(){
+  const type=VIDEODROP_EDITION==='lite'?'extension-ping':'studio-pump';
+  // Chrome can replace the worker while this popup is opening after an update.
+  for(let attempt=0;attempt<2;attempt++){
+    try{const reply=await chrome.runtime.sendMessage({type});if(reply?.ok)return true;}catch{}
+    if(attempt===0)await new Promise(resolve=>setTimeout(resolve,250));
+  }
+  message('Фоновая часть VideoDrop не ответила. Нажмите ↻ на карточке VideoDrop в chrome://extensions и откройте расширение снова.');
+  return false;
+}
 async function send(source, button) {
   try {
     button.disabled=true;let cookies=[];
@@ -77,11 +87,11 @@ $('open').onclick=()=>chrome.tabs.create({url:VIDEODROP.base});
 (async()=>{
   if(VIDEODROP_EDITION === 'lite'){
     youtubeControls={options:async()=>({provider:'local',enabled:false,deleteLocal:false})};
-    chrome.runtime.sendMessage({type:'extension-ping'});
+    await wakeBackground();
     await init();return;
   }
-  chrome.runtime.sendMessage({type:'studio-pump'});
-  youtubeControls=await new VideoDropYouTube($('youtube-settings'),{request:localAPI,wake:()=>chrome.runtime.sendMessage({type:'studio-pump'}),
+  await wakeBackground();
+  youtubeControls=await new VideoDropYouTube($('youtube-settings'),{request:localAPI,wake:wakeBackground,
     load:async()=>(await chrome.storage.local.get('studioOptions')).studioOptions,
     save:async value=>{await chrome.storage.local.remove(['cloudOptions','youtubeOptions']);await chrome.storage.local.set({studioOptions:value});}}).init();
   await init();
