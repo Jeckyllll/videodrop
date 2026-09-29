@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VideoDrop — видео на Mac",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "description": "Передать видео с открытой страницы в локальное приложение VideoDrop.",
   "permissions": [
     "activeTab",

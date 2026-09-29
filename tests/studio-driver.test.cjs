@@ -3,12 +3,14 @@ const fs=require('node:fs'),vm=require('node:vm');
 const CHANNEL='UC'+'a'.repeat(22),VIDEO='testVideo01';
 function fixture({existing=false,privacy='unlisted',cancel=false}={}){
   let phase=existing?'editor':'home',detailsSet=false,unlisted=false,visibilityReads=0,complete=false,clock=0;
+  let connectionCancelled=cancel;
   const events=[],commands=[],tabs=[],closed=[];
   const job={id:'job',lease:'LOCAL-LEASE-SECRET',path:'/Downloads/video.mp4',filename:'video.mp4',title:'A lesson',channelId:CHANNEL,madeForKids:false,videoId:existing?VIDEO:'',submitted:existing};
   const context={console,URL,AbortSignal,VIDEODROP:{base:'http://127.0.0.1:8765',token:'LOCAL-TOKEN'},Date:{now:()=>clock+=1000},
     setTimeout:callback=>setImmediate(callback),importScripts:()=>{},videoDropStudioPage:function adapter(){},
     fetch:async(url,options)=>{
       const data=JSON.parse(options.body);if(url.endsWith('/event'))events.push(data);
+      if(url.endsWith('/connect-status'))return {ok:true,json:async()=>({cancelled:connectionCancelled})};
       return {ok:true,json:async()=>cancel&&data.event==='progress'?{cancelled:true}:{}};
     },chrome:{runtime:{id:'a'.repeat(32),getManifest:()=>({version:'1.4.0'}),onMessage:{addListener(){}},onMessageExternal:{addListener(){}}},
       alarms:{onAlarm:{addListener(){}},create:()=>{}},storage:{session:{set:async()=>{},remove:async()=>{}}},
@@ -45,7 +47,8 @@ function fixture({existing=false,privacy='unlisted',cancel=false}={}){
           processed:phase==='editor',saved:phase==='editor',url:'https://studio.youtube.com/video/'+VIDEO+'/edit'}}};
       }}}};
   vm.createContext(context);vm.runInContext(fs.readFileSync('extension/studio-driver.js','utf8'),context);
-  return {job,events,commands,tabs,closed,run:()=>new (vm.runInContext('StudioRun',context))(job)};
+  const Run=vm.runInContext('StudioRun',context);
+  return {job,events,commands,tabs,closed,run:()=>new Run(job),connect:()=>new Run(null,'CONNECT-NONCE'),cancelConnection:()=>{connectionCancelled=true;}};
 }
 test('complete upload: own tab, direct file handoff, unlisted, transfer before navigation, verified receipt',async()=>{
   const f=fixture(),run=f.run();await run.upload();await run.finish();
@@ -67,4 +70,15 @@ test('private result never emits completion or deletion authorization',async()=>
 test('cancellation stops automation and closes only the tab it created',async()=>{
   const f=fixture({cancel:true}),run=f.run();await assert.rejects(()=>run.upload(),/отменена/);await run.finish();
   assert.deepEqual(f.closed,[42]);assert.equal(f.commands.some(c=>c.method==='DOM.setFileInputFiles'),false);
+});
+test('cancelled connection cannot open a late Studio tab',async()=>{
+  const f=fixture({cancel:true}),run=f.connect();
+  await assert.rejects(()=>run.start('https://studio.youtube.com/'),/Подключение отменено/);
+  await run.finish();assert.equal(f.tabs.length,0);assert.equal(f.closed.length,0);
+});
+test('cancelling while waiting for login closes only the connection tab',async()=>{
+  const f=fixture(),run=f.connect();await run.start('https://studio.youtube.com/');
+  f.cancelConnection();run.lastPulse=0;
+  await assert.rejects(()=>run.wait(s=>s.channelId,'Вход в YouTube'),/Подключение отменено/);
+  await run.finish();assert.deepEqual(f.closed,[42]);assert.equal(f.events.length,0);
 });

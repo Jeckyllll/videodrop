@@ -12,7 +12,7 @@ async function studioAPI(path,body={}) {
 }
 
 class StudioRun {
-  constructor(job){this.job=job;this.tabId=null;this.attached=false;this.lastPulse=0;this.stopped=false;}
+  constructor(job,connectNonce=null){this.job=job;this.connectNonce=connectNonce;this.tabId=null;this.attached=false;this.lastPulse=0;this.stopped=false;}
   async command(method,params={}){return chrome.debugger.sendCommand({tabId:this.tabId},method,params);}
   async page(command='snapshot'){
     const input=this.job?{channelId:this.job.channelId,title:this.job.title,madeForKids:this.job.madeForKids}:{};
@@ -28,7 +28,13 @@ class StudioRun {
     return reply;
   }
   async pulse(stage){
-    if(this.job&&Date.now()-this.lastPulse>3000){await this.event('progress',{stage});this.lastPulse=Date.now();}
+    if(!this.lastPulse||Date.now()-this.lastPulse>3000){
+      if(this.connectNonce){
+        const reply=await studioAPI('connect-status',{nonce:this.connectNonce});
+        if(reply.cancelled){this.stopped=true;throw new Error('Подключение отменено.');}
+      }else if(this.job)await this.event('progress',{stage});
+      this.lastPulse=Date.now();
+    }
   }
   async wait(check,stage,timeout=120000){
     const end=Date.now()+timeout;
@@ -46,6 +52,7 @@ class StudioRun {
   async start(url){
     // Never attach to an existing user tab or to an arbitrary URL from a page.
     if(!/^https:\/\/studio\.youtube\.com\/(?:$|video\/[\w-]{11}\/edit$)/.test(url))throw new Error('Неизвестный адрес Studio.');
+    if(this.connectNonce)await this.pulse('Подключаем Chrome');
     const tab=await chrome.tabs.create({url,active:true});this.tabId=tab.id;
     await chrome.debugger.attach({tabId:this.tabId},'1.3');this.attached=true;
     await chrome.storage.session.set({studioActive:{tabId:this.tabId,jobId:this.job?.id||null}});
@@ -127,12 +134,12 @@ async function studioPump(){
     await studioAPI('heartbeat',{protocol:studioProtocol,version:chrome.runtime.getManifest().version});
     const task=await studioAPI('claim');
     if(task.connect){
-      const run=new StudioRun(null);
+      const run=new StudioRun(null,task.connect.nonce);
       try{
         await run.start('https://studio.youtube.com/');
         const page=await run.wait(s=>s.channelId?s:false,'Войдите в YouTube в открытой вкладке',540000);
         await studioAPI('connected',{nonce:task.connect.nonce,channelId:page.channelId,channelTitle:page.channelTitle});
-      }catch(error){try{await studioAPI('connected',{nonce:task.connect.nonce,error:true});}catch{}}
+      }catch(error){run.stopped=true;try{await studioAPI('connected',{nonce:task.connect.nonce,error:true});}catch{}}
       finally{await run.finish();}
     }else if(task.job){
       const run=new StudioRun(task.job);

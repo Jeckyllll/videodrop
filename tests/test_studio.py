@@ -74,6 +74,49 @@ class StudioTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.broker.connect()
         with self.assertRaises(ValueError): self.broker.disconnect()
 
+    def test_cancel_connection_keeps_existing_channel_and_rejects_late_response(self):
+        self.broker.connect(); request = self.broker.claim()['connect']
+        self.assertFalse(self.broker.connect_status(request)['cancelled'])
+        status = self.broker.cancel_connect()
+        self.assertFalse(status['connecting'])
+        self.assertEqual(status['channelId'], CHANNEL)
+        self.assertTrue(self.broker.connect_status(request)['cancelled'])
+        self.assertEqual(self.broker.claim(), {})
+        with self.assertRaises(ValueError):
+            self.broker.connected({**request, 'channelId': 'UC' + 'b' * 22})
+        self.assertEqual(self.broker.channel()['id'], CHANNEL)
+
+    def test_connection_without_chrome_expires_in_45_seconds_including_reopened_status(self):
+        self.broker.extension = {}
+        self.broker.connect()
+        self.broker.connect_request['created'] -= 46
+        status = self.broker.status()
+        self.assertFalse(status['connecting'])
+        self.assertIn('45 секунд', status['connectError'])
+        self.assertEqual(self.broker.claim(), {})
+        self.assertEqual(self.broker.status()['connectError'], status['connectError'])
+        self.assertEqual(self.broker.connect()['connectError'], '')
+
+    def test_duplicate_connect_keeps_nonce_and_claimed_login_gets_longer_timeout(self):
+        self.broker.connect(); request = self.broker.claim()['connect']
+        self.broker.connect()
+        self.assertEqual(self.broker.connect_request['nonce'], request['nonce'])
+        self.assertEqual(self.broker.claim(), {})
+        self.broker.connect_request['created'] -= 46
+        self.assertTrue(self.broker.status()['connecting'])
+        self.broker.connect_request['created'] -= 600
+        self.assertTrue(self.broker.connect_status(request)['cancelled'])
+        self.assertFalse(self.broker.status()['connecting'])
+        self.assertIn('Время входа', self.broker.status()['connectError'])
+
+    def test_failed_channel_switch_reports_error_without_disconnecting_old_channel(self):
+        self.broker.connect(); request = self.broker.claim()['connect']
+        self.broker.connected({**request, 'error': True})
+        status = self.broker.status()
+        self.assertFalse(status['connecting'])
+        self.assertEqual(status['channelId'], CHANNEL)
+        self.assertIn('Отладчик', status['connectError'])
+
     def test_upload_claim_is_unique_and_only_returns_saved_file(self):
         job, lease = self.claimed()
         self.assertEqual(self.broker.claim(), {})
@@ -194,6 +237,14 @@ class StudioTests(unittest.TestCase):
                     self.assertEqual(error.exception.code,403)
                 headers={'X-VideoDrop-Token':'test','X-VideoDrop-Extension':EXTENSION,'Origin':'chrome-extension://'+EXTENSION}
                 with request('/api/studio/heartbeat',{'protocol':1},headers) as response:self.assertTrue(json.load(response)['ready'])
+                self.broker.connect(); pending = self.broker.claim()['connect']
+                with request('/api/studio/connect-status', pending, headers) as response:self.assertFalse(json.load(response)['cancelled'])
+                with self.assertRaises(HTTPError) as error:request('/api/studio/connect-status', pending, {'X-VideoDrop-Token':'test'})
+                self.assertEqual(error.exception.code,403)
+                with self.assertRaises(HTTPError) as error:request('/api/studio/cancel-connect', {})
+                self.assertEqual(error.exception.code,403)
+                with request('/api/studio/cancel-connect', {}, {'X-VideoDrop-Token':'test'}) as response:self.assertFalse(json.load(response)['connecting'])
+                with request('/api/studio/connect-status', pending, headers) as response:self.assertTrue(json.load(response)['cancelled'])
                 for path in ('/api/youtube/status','/oauth/youtube/callback','/api/cloud/status'):
                     with self.assertRaises(HTTPError) as error:request(path,headers=headers)
                     self.assertEqual(error.exception.code,404)

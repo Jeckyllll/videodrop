@@ -414,7 +414,9 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(200, STUDIO.connect())
             if path == "/api/studio/disconnect":
                 return self.respond(200, STUDIO.disconnect())
-            if path in ("/api/studio/heartbeat", "/api/studio/claim", "/api/studio/event", "/api/studio/connected"):
+            if path == "/api/studio/cancel-connect":
+                return self.respond(200, STUDIO.cancel_connect())
+            if path in ("/api/studio/heartbeat", "/api/studio/claim", "/api/studio/event", "/api/studio/connected", "/api/studio/connect-status"):
                 extension_id = self.headers.get("X-VideoDrop-Extension", "")
                 origin = self.headers.get("Origin", "")
                 if not re.fullmatch(r"[a-p]{32}", extension_id) or origin and origin != "chrome-extension://" + extension_id:
@@ -432,6 +434,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.respond(200, STUDIO.claim())
                 if path == "/api/studio/connected":
                     return self.respond(200, STUDIO.connected(data))
+                if path == "/api/studio/connect-status":
+                    return self.respond(200, STUDIO.connect_status(data))
                 return self.respond(200, STUDIO.event(data))
             if path in ("/api/inspect", "/api/import"):
                 source = clean_source(data)

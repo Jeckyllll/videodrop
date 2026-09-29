@@ -9,6 +9,8 @@ import time
 import unicodedata
 
 PROTOCOL = 1
+CONNECT_WAIT = 45
+CONNECT_TIMEOUT = 600
 
 
 def identifier(value, kind='video'):
@@ -49,6 +51,7 @@ class Broker:
         self.state, self.downloads = Path(state), Path(downloads)
         self.extension = {}
         self.connect_request = None
+        self.connect_error = ''
 
     def channel(self):
         value = read_json(self.state / 'studio-channel.json')
@@ -56,11 +59,20 @@ class Broker:
 
     def status(self):
         with self.lock:
+            self.expire_connect()
             channel = self.channel()
             ready = time.time() - self.extension.get('seen', 0) < 75
             return {'provider': 'studio', 'connected': bool(channel), 'ready': ready,
                     'channelId': channel.get('id', ''), 'channelTitle': channel.get('title', ''),
-                    'extensionId': self.extension.get('id', ''), 'connecting': bool(self.connect_request)}
+                    'extensionId': self.extension.get('id', ''), 'connecting': bool(self.connect_request),
+                    'connectError': self.connect_error}
+
+    def expire_connect(self):
+        pending = self.connect_request
+        if pending and time.time() - pending['created'] > (CONNECT_TIMEOUT if pending['claimed'] else CONNECT_WAIT):
+            self.connect_request = None
+            self.connect_error = ('Время входа в YouTube истекло. Повторите подключение.' if pending['claimed'] else
+                                  'Расширение Chrome не ответило за 45 секунд. Обновите VideoDrop в chrome://extensions, откройте его и повторите подключение.')
 
     def settings(self, value):
         value = {} if value is None else value
@@ -75,7 +87,7 @@ class Broker:
         if not current['connected'] or current['channelId'] != value.get('channelId'):
             raise ValueError('Подключите нужный канал YouTube в настройках выше.')
         if not current['ready']:
-            raise ValueError('Откройте Chrome и расширение VideoDrop 1.3. Затем повторите отправку.')
+            raise ValueError('Откройте Chrome и расширение VideoDrop. Затем повторите отправку.')
         return {**off, 'enabled': True, 'deleteLocal': value.get('deleteLocal', False),
                 'channelId': current['channelId'], 'madeForKids': value.get('madeForKids', False)}
 
@@ -91,31 +103,50 @@ class Broker:
 
     def connect(self):
         with self.lock:
+            self.expire_connect()
             if any(j.get('uploading') or j.get('uploadQueued') for j in self.jobs.values()):
                 raise ValueError('Дождитесь завершения отправки перед сменой канала.')
-            self.connect_request = {'nonce': secrets.token_urlsafe(24), 'created': time.time(), 'claimed': False}
+            if not self.connect_request:
+                self.connect_error = ''
+                self.connect_request = {'nonce': secrets.token_urlsafe(24), 'created': time.time(), 'claimed': False}
         return self.status()
+
+    def cancel_connect(self):
+        with self.lock:
+            self.connect_request = None
+            self.connect_error = ''
+        return self.status()
+
+    def connect_status(self, data):
+        with self.lock:
+            self.expire_connect()
+            pending = self.connect_request
+            return {'cancelled': not pending or not hmac.compare_digest(str(data.get('nonce', '')), pending['nonce'])}
 
     def disconnect(self):
         with self.lock:
             if any(j.get('uploading') or j.get('uploadQueued') for j in self.jobs.values()):
                 raise ValueError('Сначала остановите текущую отправку.')
             self.connect_request = None
+            self.connect_error = ''
             (self.state / 'studio-channel.json').unlink(missing_ok=True)
         return self.status()
 
     def connected(self, data):
         with self.lock:
+            self.expire_connect()
             pending = self.connect_request
-            if not pending or not hmac.compare_digest(str(data.get('nonce', '')), pending['nonce']) or time.time() - pending['created'] > 600:
+            if not pending or not pending['claimed'] or not hmac.compare_digest(str(data.get('nonce', '')), pending['nonce']):
                 raise ValueError('Подключение устарело. Нажмите «Подключить Chrome» заново.')
             if data.get('error'):
                 self.connect_request = None
+                self.connect_error = 'Не удалось подключить YouTube Studio. Проверьте вход в YouTube и разрешение «Отладчик» у расширения VideoDrop.'
                 return {'ok': False}
             channel = identifier(data.get('channelId'), 'channel')
             title = str(data.get('channelTitle') or channel).strip()[:150]
             write_json(self.state / 'studio-channel.json', {'id': channel, 'title': title})
             self.connect_request = None
+            self.connect_error = ''
         return self.status()
 
     def file(self, job):
@@ -267,8 +298,7 @@ class Broker:
 
     def maintenance(self):
         with self.lock:
-            if self.connect_request and time.time() - self.connect_request['created'] > 600:
-                self.connect_request = None
+            self.expire_connect()
             for job in list(self.jobs.values()):
                 if job.get('uploading') and time.time() - job.get('_studioSeen', 0) > 100:
                     self.fail(job, 'Chrome перестал отвечать. Проверьте YouTube Studio. Локальный файл сохранён.')
