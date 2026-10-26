@@ -22,6 +22,8 @@ def create_app(service):
         # No public access, pairing, files, or browser credentials in Telegram-only mode.
         if not service.base and request.path != '/health':
             return jsonify(error='Сейчас включён только Telegram-бот.'), 404
+        if service.downloads_only and request.path != '/health' and not request.path.startswith('/download/'):
+            return jsonify(error='Сейчас доступны только файлы из Telegram-бота.'), 404
         if service.base and not service.base.startswith('https://'):
             return jsonify(error='Серверу требуется HTTPS.'),503
         if request.path in ('/api/pair','/oauth/callback'):
@@ -69,7 +71,7 @@ def create_app(service):
     def health():
         return jsonify(service='VideoDrop',version=VERSION,telegramConfigured=bool(service.tg.token),
             telegramConnected=time.time()-service.poll_seen<90,youtubeConnected=service.youtube.ready(),
-            mode='telegram' if not service.base else 'telegram-and-extension')
+            mode='telegram' if not service.base else ('telegram-with-files' if service.downloads_only else 'telegram-and-extension'))
 
     @app.post('/api/pair')
     def pair():
@@ -139,7 +141,8 @@ def main():
     service=Service(os.environ.get('VIDEODROP_STATE','/data'),owner,
         token=os.environ.get('VIDEODROP_BOT_TOKEN',''),public_base=os.environ.get('VIDEODROP_PUBLIC_URL',''),
         telegram_base=os.environ.get('VIDEODROP_TELEGRAM_URL','https://api.telegram.org'),
-        telegram_local=os.environ.get('VIDEODROP_TELEGRAM_LOCAL')=='1')
+        telegram_local=os.environ.get('VIDEODROP_TELEGRAM_LOCAL')=='1',
+        downloads_only=os.environ.get('VIDEODROP_PUBLIC_MODE','files')=='files')
     service.start()
     # Reverse proxy, if added later, must terminate HTTPS. Compose only publishes loopback.
     class QuietHandler(WSGIRequestHandler):

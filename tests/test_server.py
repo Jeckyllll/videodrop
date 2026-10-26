@@ -87,7 +87,8 @@ class ServerTests(unittest.TestCase):
 
     def test_media_image_inspection_emits_kind_in_json_protocol(self):
         output = io.StringIO()
-        with patch('server.media.guard_network'), patch('server.media.clean_source', side_effect=lambda x:x), patch('sys.stdout', output):
+        with patch('server.media.guard_network'), patch('server.media.clean_source', side_effect=lambda x:x), patch('sys.stdout', output), \
+                patch('server.images.instagram',return_value={'title':'Изображения поста','kind':'images','heights':[],'imageCount':5}):
             run_media({'source':{'url':'https://www.instagram.com/p/example/'},'mode':'inspect'})
         message = json.loads(output.getvalue())
         self.assertEqual(message['event'], 'result')
@@ -151,6 +152,29 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(sizes['1280']['bytes'],5200000)
         self.assertEqual(sizes['1920']['bytes'],20000000)
 
+    def test_hls_size_includes_probed_audio_bitrate(self):
+        for bitrate,expected in ((128000,1410000),(None,None)):
+            row=self.job()
+            def media(current,mode):
+                if mode=='inspect':
+                    return {'kind':'video','qualitySizes':{'720':{
+                        'bytes':None,'bytesPerSecond':125000,'needsAudioBitrate':True}}}
+                return {'path':str(self.file(current)),'media':{'duration':10,'audioBitrate':bitrate}}
+            self.s.media=Mock(side_effect=media)
+            self.s.run_job(row)
+            size=json.loads(self.s.store.job(row['id'])['metadata'])['qualitySizes']['720']['bytes']
+            self.assertEqual(size,expected)
+
+    def test_tiktok_video_url_with_only_music_is_classified_as_photo_post(self):
+        output=io.StringIO()
+        with patch('server.media.guard_network'), patch('server.media.clean_source',side_effect=lambda x:x), \
+                patch('yt_dlp.YoutubeDL'), patch('worker.extract_info',return_value={}), \
+                patch('worker.metadata',return_value={'hasVideo':False,'hasAudio':True}), patch('sys.stdout',output):
+            run_media({'mode':'inspect','source':{'url':'https://www.tiktok.com/@user/video/123','cookies':[]}})
+        result=json.loads(output.getvalue())
+        self.assertEqual(result['kind'],'images')
+        self.assertEqual(result['title'],'Изображения поста')
+
     def test_employee_cannot_approve_users_or_export_all_history(self):
         with self.assertRaises(PermissionError):
             self.s.store.set_role(2,3,'employee')
@@ -168,6 +192,20 @@ class ServerTests(unittest.TestCase):
     def test_group_messages_never_create_jobs(self):
         self.s.handle({'message':{'chat':{'type':'group'},'from':{'id':2},'text':'https://example.com'}})
         self.assertEqual(self.s.store.history(1),[])
+
+    def test_public_file_mode_keeps_extension_and_oauth_closed(self):
+        self.s.base='https://files.example.com'
+        self.s.downloads_only=True
+        client=create_app(self.s).test_client()
+        for path in ('/api/jobs','/api/pair','/oauth/callback','/api/audit'):
+            self.assertEqual(client.get(path).status_code,404)
+        self.assertEqual(client.get('/health').json['mode'],'telegram-with-files')
+        row=self.job();p=self.file(row)
+        self.s.store.update(row['id'],mode='file',state='done',expires=time.time()+86400)
+        link=self.s.file_links(self.s.store.job(row['id']))[0]['url']
+        with client.get(link.removeprefix(self.s.base)) as response:
+            self.assertEqual(response.status_code,200)
+            self.assertEqual(response.data,p.read_bytes())
 
     def test_selection_is_idempotent_and_preserves_files(self):
         row=self.job(); p=self.file(row)

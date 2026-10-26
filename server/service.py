@@ -25,7 +25,7 @@ from server.youtube import YouTube
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024*1024
 GIB = 1024*MIB
-VERSION = '2.0.0-preview.6'
+VERSION = '2.0.0-preview.7'
 FILE_TTL = 24*60*60
 LABELS = {'queued':'В очереди','inspecting':'Проверяем ссылку','choice':'Ожидает выбора',
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
@@ -97,7 +97,8 @@ class Telegram:
 
 class Service:
     def __init__(self, state, owner, token='', public_base='', key=None, telegram_base='https://api.telegram.org',
-                 telegram_local=False):
+                 telegram_local=False, downloads_only=False):
+        self.downloads_only = downloads_only
         self.state = Path(state).resolve()
         self.state.mkdir(parents=True, exist_ok=True)
         os.chmod(self.state, 0o700)
@@ -340,13 +341,13 @@ class Service:
                 self.store.require(uid,owner=True)
                 if self.youtube.ready():
                     return self.notify(uid,'YouTube подключён. Для больших видео выбери «Получить ссылку».')
-                if not self.base:
+                if not self.base or self.downloads_only:
                     return self.notify(uid,'Подключение YouTube готовится. Для первоначального входа нужен OAuth-клиент Google Cloud; пока он не настроен.')
                 state = self.store.issue(uid,'oauth',600)
                 return self.notify(uid,'Подключи нужный канал через Google. Разрешения на загрузку и проверку роликов получает только сервер VideoDrop.',
                     [[{'text':'Подключить YouTube','url':self.youtube.authorize(state)}]])
             if cmd == '/pair':
-                if not self.base:
+                if not self.base or self.downloads_only:
                     raise ValueError('Подключение расширения пока не включено: сейчас работает только бот.')
                 code = self.store.issue(uid,'pair',600)
                 return self.notify(uid,f'Адрес сервера: {self.base}\nКод расширения: {code}\nДействует 10 минут, один раз. Не пересылай его другим людям.')
@@ -463,7 +464,8 @@ class Service:
                 shutil.rmtree(directory)
             directory.mkdir()
         request = {'source':self.store.source(row['id']), 'mode':mode, 'directory':str(directory),
-                   'format':row['format'], 'height':row['height']}
+                   'format':row['format'], 'height':row['height'],
+                   'kind':json.loads(row['metadata']).get('kind')}
         env = {k:v for k,v in os.environ.items() if k in ('PATH','LANG','LC_ALL','SSL_CERT_FILE','SSL_CERT_DIR')}
         env.update(PYTHONUNBUFFERED='1',HOME=str(directory),XDG_CACHE_HOME=str(directory/'.cache'))
         process = subprocess.Popen([sys.executable,'-m','server.media'],cwd=ROOT,env=env,
@@ -615,7 +617,12 @@ class Service:
                     if result['media'].get('duration'):
                         for estimate in info.get('qualitySizes',{}).values():
                             if estimate.get('bytes') is None and estimate.get('bytesPerSecond'):
-                                estimate['bytes'] = round(estimate['bytesPerSecond']*result['media']['duration'])
+                                rate = estimate['bytesPerSecond']
+                                if estimate.get('needsAudioBitrate'):
+                                    if not result['media'].get('audioBitrate'):
+                                        continue
+                                    rate += result['media']['audioBitrate']/8
+                                estimate['bytes'] = round(rate*result['media']['duration'])
                     self.store.event(jid,row['user_id'],'media_verified',json.dumps(result['media']))
                 self.store.update(jid,files=json.dumps([str(p.relative_to(directory)) for p in paths]),size=size,metadata=json.dumps(info))
                 self.store.event(jid,row['user_id'],'download_ready',str(size))

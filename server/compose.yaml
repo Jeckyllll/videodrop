@@ -4,7 +4,7 @@ services:
     build:
       context: ..
       dockerfile: server/Dockerfile
-    image: videodrop:2.0.0-preview.6
+    image: videodrop:2.0.0-preview.7
     restart: unless-stopped
     env_file: .env
     ports:

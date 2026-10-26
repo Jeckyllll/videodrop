@@ -1,0 +1,26 @@
+{
+    # Bearer download links must not appear in error/access logs.
+    log {
+        format filter {
+            wrap json
+            fields {
+                request>uri delete
+                request>headers>Cookie delete
+                request>headers>Authorization delete
+            }
+        }
+    }
+}
+
+{$VIDEODROP_DOWNLOAD_HOST} {
+    @files {
+        path /download/*
+        method GET HEAD
+    }
+    handle @files {
+        reverse_proxy 127.0.0.1:8787
+    }
+    handle {
+        respond 404
+    }
+}

@@ -7,14 +7,21 @@ from pathlib import Path
 import re
 import shutil
 import sys
+import threading
 
 import imageio_ffmpeg
 import yt_dlp
 from yt_dlp.cookies import YoutubeDLCookieJar
 
 
+_output_lock = threading.Lock()
+
+
 def emit(event, **data):
-    print(json.dumps({"event": event, **data}, ensure_ascii=False), flush=True)
+    # Fragment downloads call progress hooks concurrently. Keep JSON + newline
+    # atomic so two updates cannot corrupt the parent/worker protocol.
+    with _output_lock:
+        print(json.dumps({"event": event, **data}, ensure_ascii=False), flush=True)
 
 
 def friendly_error(error):
@@ -173,6 +180,13 @@ def quality_sizes(info, formats, heights, ydl):
             # Some sites omit duration. The server can fill the estimate after
             # probing the first downloaded file, without downloading each quality.
             result[str(height)]['bytesPerSecond'] = sum(rates)*1000/8
+        elif total is None and parts and any(p.get('vcodec') != 'none' for p in parts):
+            missing = [p for p,rate in zip(parts,rates) if not positive(rate)]
+            if len(missing)==1 and missing[0].get('vcodec')=='none':
+                # HLS often omits the audio bitrate. The downloaded audio is
+                # shared by the video qualities, so ffprobe can complete it.
+                result[str(height)].update(bytesPerSecond=sum(r for r in rates if positive(r))*1000/8,
+                                           needsAudioBitrate=True)
     return result
 
 

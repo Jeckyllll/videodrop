@@ -62,6 +62,26 @@ class TikTokFallbackTests(unittest.TestCase):
             session.assert_not_called()
 
 
+class WorkerProtocolTests(unittest.TestCase):
+    def test_concurrent_fragment_progress_is_valid_json_lines(self):
+        import io
+        import time
+        import worker
+        class YieldingOutput(io.StringIO):
+            def write(self, value):
+                super().write(value)
+                time.sleep(0.0001)
+                return len(value)
+        output=YieldingOutput()
+        with patch('sys.stdout',output):
+            threads=[threading.Thread(target=lambda i=i: [worker.emit('progress',stream=i,n=n) for n in range(20)]) for i in range(4)]
+            for thread in threads:thread.start()
+            for thread in threads:thread.join()
+        events=[json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(events),80)
+        self.assertEqual({(e['stream'],e['n']) for e in events},{(i,n) for i in range(4) for n in range(20)})
+
+
 class FormatSelectionTests(unittest.TestCase):
     def select(self, formats, height=0):
         with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
@@ -116,6 +136,14 @@ class FormatSelectionTests(unittest.TestCase):
         size=self.sizes(formats,duration=None)['0']
         self.assertIsNone(size['bytes'])
         self.assertEqual(size['bytesPerSecond'],108000)
+
+    def test_hls_audio_without_bitrate_is_marked_for_probe_not_silently_omitted(self):
+        formats=[self.fmt('audio','m4a','none','aac'),
+                 {**self.fmt('1080','mp4','avc1','none',1080),'tbr':1000}]
+        size=self.sizes(formats)['0']
+        self.assertIsNone(size['bytes'])
+        self.assertEqual(size['bytesPerSecond'],125000)
+        self.assertTrue(size['needsAudioBitrate'])
 
 
 class ValidationTests(unittest.TestCase):

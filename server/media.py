@@ -65,7 +65,7 @@ def guard_network():
 def image_post(url):
     p = urlsplit(url)
     host = p.hostname.lower()
-    return ((host == 'instagram.com' or host.endswith('.instagram.com')) and p.path.startswith('/p/')) or (
+    return ((host == 'instagram.com' or host.endswith('.instagram.com')) and bool(re.match(r'^/(?:[^/]+/)?p/',p.path))) or (
             (host == 'tiktok.com' or host.endswith('.tiktok.com')) and '/photo/' in p.path)
 
 
@@ -89,7 +89,7 @@ def validate_download(path, request):
     """Inspect the actual file, rather than trusting its .mp4 extension or extractor metadata."""
     try:
         result = subprocess.run(['ffprobe','-v','error','-protocol_whitelist','file,pipe',
-            '-show_entries','stream=codec_name,codec_type,width,height:stream_disposition=attached_pic:format=duration',
+            '-show_entries','stream=codec_name,codec_type,width,height,bit_rate:stream_disposition=attached_pic:format=duration',
             '-of','json',str(path)],capture_output=True,text=True,timeout=30,check=True)
         info = json.loads(result.stdout)
     except (OSError,ValueError,subprocess.SubprocessError):
@@ -114,6 +114,12 @@ def validate_download(path, request):
         'quicktimeWarning':bool(request['format']=='mkv'
             or (video and video.get('codec_name') in ('vp8','vp9','av1','theora'))
             or (audio and audio.get('codec_name') in ('opus','vorbis')))}
+    try:
+        bitrate = int(audio.get('bit_rate')) if audio else 0
+        if bitrate>0:
+            media['audioBitrate'] = bitrate
+    except (TypeError,ValueError):
+        pass
     return {'media':media}
 
 
@@ -123,7 +129,16 @@ def run(request):
     guard_network()
     source = clean_source(request['source'])
     request['source'] = source
-    if image_post(source['url']):
+    host = urlsplit(source['url']).hostname
+    tiktok = host == 'tiktok.com' or host.endswith('.tiktok.com')
+    if image_post(source['url']) and urlsplit(source['url']).hostname.endswith('instagram.com'):
+        from server.images import instagram
+        result = instagram(request)
+        if result is not None:
+            worker.emit('result', **result)
+            return
+        # Instagram /p/ URLs can also be video posts. Keep their video and sound.
+    if tiktok and (image_post(source['url']) or request.get('kind')=='images'):
         if request['mode'] == 'inspect':
             worker.emit('result', title='Изображения поста', kind='images', heights=[], duration=0)
             return
@@ -155,6 +170,9 @@ def run(request):
         files = sorted(p for p in directory.rglob('*') if p.is_file() and p.suffix.lower() in ('.jpg','.jpeg','.png','.webp','.avif','.gif'))
         if status or not files:
             raise ValueError('Не удалось получить картинки. Пост может требовать входа: в текущем режиме бот не получает авторизацию из браузера.')
+        from server.images import validate_image
+        for path in files:
+            validate_image(path)
         worker.emit('result', paths=[str(p) for p in files], size=sum(p.stat().st_size for p in files), kind='images')
         return
     if request['mode'] == 'inspect':
@@ -162,7 +180,12 @@ def run(request):
             ydl.cookiejar = worker.cookie_jar(source['cookies'])
             info = worker.extract_info(ydl, source)
             result = worker.metadata(info, ydl)
-            result.update(kind='video', size=info.get('filesize') or info.get('filesize_approx'))
+            # TikTok also shares photo carousels under /video/ URLs. Its video
+            # extractor returns only their music; don't offer that as a video.
+            photos = tiktok and not result['hasVideo']
+            result.update(kind='images' if photos else 'video', size=info.get('filesize') or info.get('filesize_approx'))
+            if photos:
+                result.update(title='Изображения поста',heights=[],qualitySizes={})
             worker.emit('result', **result)
         return
     worker.run(request, validate_download=validate_download)
