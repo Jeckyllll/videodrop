@@ -10,7 +10,7 @@ from server.app import create_app
 from server.media import clean_source, image_post, public_url, friendly_error
 from server.media import run as run_media
 from server.media import validate_download
-from server.service import Service
+from server.service import Service, Telegram
 from server.store import Store
 
 
@@ -19,6 +19,12 @@ class ServerTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory()
         self.s=Service(self.tmp.name,1)
         self.s.tg=Mock(limit=45*1024*1024,token='test-only')
+        self.next_message_id=100
+        def sent(*args,**kwargs):
+            self.next_message_id+=1
+            return {'message_id':self.next_message_id}
+        self.s.tg.say.side_effect=sent
+        self.s.tg.edit.side_effect=lambda uid,mid,*args: {'message_id':mid}
         self.s.store.user(2,'Иван','ivan')
         self.s.store.user(3,'Анна','anna')
         self.s.store.set_role(1,2,'employee')
@@ -27,6 +33,18 @@ class ServerTests(unittest.TestCase):
     def tearDown(self):
         self.s.store.db.close()
         self.tmp.cleanup()
+
+    def last_card(self):
+        for call in reversed(self.s.tg.mock_calls):
+            if call[0] in ('say','edit'):
+                start=1 if call[0]=='say' else 2
+                return call.args[start],call.args[start+1] if len(call.args)>start+1 else []
+        raise AssertionError('No Telegram card')
+
+    def callback(self,row,action,uid=2,message_id=None):
+        self.s.handle({'callback_query':{'id':'callback-test','from':{'id':uid,'first_name':'User'},
+            'message':{'message_id':message_id or row['telegram_message_id'],'chat':{'id':uid,'type':'private'}},
+            'data':action+':'+row['id']}})
 
     def job(self, uid=2, **kwargs):
         return self.s.store.create(uid,{'url':'https://example.com/lesson?token=SECRET&id=55',
@@ -83,7 +101,7 @@ class ServerTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'нет видеодорожки'):
                     validate_download(Path('video.mp4'),{'format':'mp4'})
 
-    def test_real_codecs_are_reported_and_vp9_is_warned_before_and_after_selection(self):
+    def test_real_codecs_are_reported_and_compatibility_warning_stays_in_file_caption(self):
         for codec,warning in (('vp9',True),('h264',False)):
             with self.subTest(codec=codec):
                 probe={'streams':[{'codec_type':'video','codec_name':codec,'width':1080,'height':1920},
@@ -94,9 +112,9 @@ class ServerTests(unittest.TestCase):
                 row=self.job(); self.file(row)
                 self.s.store.update(row['id'],metadata=json.dumps({'kind':'video','downloadedMedia':media}))
                 self.s.ask_choice(self.s.store.job(row['id']))
-                choice=self.s.tg.say.call_args.args[1]
+                choice=self.last_card()[0]
                 self.assertIn('1080×1920',choice)
-                self.assertEqual('QuickTime' in choice,warning)
+                self.assertNotIn('QuickTime',choice)
                 self.s.store.choose(row['id'],2,'file')
                 self.s.deliver(self.s.store.job(row['id']))
                 caption=self.s.tg.document.call_args.args[2]
@@ -210,8 +228,8 @@ class ServerTests(unittest.TestCase):
         self.s.youtube.upload.assert_called_once()
         self.assertFalse(p.exists())
         self.assertEqual(self.s.store.job(row['id'])['state'],'done')
-        self.assertIn('https://youtu.be/employee-video',str(self.s.tg.say.call_args_list))
-        self.assertNotIn('/download/',str(self.s.tg.say.call_args_list))
+        self.assertIn('https://youtu.be/employee-video',str(self.s.tg.mock_calls))
+        self.assertNotIn('/download/',str(self.s.tg.mock_calls))
 
     def test_telegram_downloads_video_before_asking_how_to_deliver(self):
         for duration in (12,3600,None):
@@ -249,7 +267,7 @@ class ServerTests(unittest.TestCase):
                 self.assertTrue(p.exists())
                 self.assertGreaterEqual(current['expires'],before+86400)
                 self.assertLess(current['expires'],time.time()+86401)
-                self.assertIn('/download/',str(self.s.tg.say.call_args))
+                self.assertIn('/download/',str(self.s.tg.mock_calls))
                 self.s.tg.document.assert_not_called()
                 self.s.tg.reset_mock()
 
@@ -257,19 +275,20 @@ class ServerTests(unittest.TestCase):
         self.s.base='https://example.com'
         row=self.job(); p=self.file(row)
         self.s.store.update(row['id'],state='choice')
-        with self.assertRaisesRegex(ValueError,'YouTube'):
-            self.s.handle_callback(2,'link:'+row['id'])
+        self.assertIn('YouTube',self.s.handle_callback(2,'link:'+row['id']))
         self.assertTrue(p.exists())
         self.assertEqual(self.s.store.job(row['id'])['state'],'choice')
-        self.assertNotIn('/download/',str(self.s.tg.say.call_args_list))
+        self.assertNotIn('/download/',str(self.s.tg.mock_calls))
 
     def test_database_upgrade_preserves_existing_jobs_as_telegram_jobs(self):
         row=self.job()
         self.s.store.db.execute('ALTER TABLE jobs DROP COLUMN entrypoint')
+        self.s.store.db.execute('ALTER TABLE jobs DROP COLUMN telegram_message_id')
         self.s.store.db.commit()
         self.s.store.db.close()
         self.s.store=Store(self.s.state/'jobs.sqlite3',(self.s.state/'secret.key').read_bytes(),1)
         self.assertEqual(self.s.store.job(row['id'])['entrypoint'],'telegram')
+        self.assertEqual(self.s.store.job(row['id'])['telegram_message_id'],0)
         self.assertEqual(self.s.store.source(row['id'])['cookies'][0]['value'],'PRIVATE')
 
     def test_extension_requires_preset_mode_and_result_never_extends_file_expiry(self):
@@ -388,7 +407,7 @@ class ServerTests(unittest.TestCase):
         row = self.job()
         self.s.store.update(row['id'], state='choice', metadata=json.dumps({'heights':[4320,2160,1920,1440,1080,720,480,360,240]}))
         self.s.handle_callback(2, 'quality:'+row['id'])
-        buttons = self.s.tg.say.call_args.args[2]
+        buttons = self.last_card()[1]
         labels = [b['text'] for line in buttons for b in line]
         for height in (4320,2160,1920,1440,1080,720,480,360,240):
             self.assertIn(f'до {height}p · размер неизвестен', labels)
@@ -399,13 +418,13 @@ class ServerTests(unittest.TestCase):
             'heights':[1920,1280,640], 'qualitySizes':{'0':{'bytes':6*1024*1024},
             '1920':{'bytes':6*1024*1024},'1280':{'bytes':3*1024*1024},'640':{'bytes':None}}}))
         self.s.handle_callback(2,'quality:'+row['id'])
-        labels=[b['text'] for line in self.s.tg.say.call_args.args[2] for b in line]
+        labels=[b['text'] for line in self.last_card()[1] for b in line]
         self.assertIn('Лучшее · 5.0 МБ',labels)
         self.assertIn('до 1280p · ≈ 3.0 МБ',labels)
         self.assertIn('до 640p · размер неизвестен',labels)
         self.s.handle_callback(2,'height:'+row['id']+':1280')
         self.s.handle_callback(2,'quality:'+row['id'])
-        labels=[b['text'] for line in self.s.tg.say.call_args.args[2] for b in line]
+        labels=[b['text'] for line in self.last_card()[1] for b in line]
         self.assertIn('до 1280p · ≈ 3.0 МБ',labels)
         self.assertNotIn('до 1280p · 5.0 МБ',labels)
 
@@ -413,9 +432,121 @@ class ServerTests(unittest.TestCase):
         row=self.job(); self.file(row)
         self.s.store.update(row['id'],state='choice',format='mp3',size=0,files='[]')
         self.s.handle_callback(2,'quality:'+row['id'])
-        self.assertIn('после скачивания',self.s.tg.say.call_args.args[1])
-        callbacks=[b['callback_data'] for line in self.s.tg.say.call_args.args[2] for b in line]
+        self.assertIn('после скачивания',self.last_card()[0])
+        callbacks=[b['callback_data'] for line in self.last_card()[1] for b in line]
         self.assertFalse(any(c.startswith('height:') for c in callbacks))
+
+    def test_full_task_edits_one_card_and_removes_buttons_after_delivery(self):
+        row=self.job(uid=1); self.s.show_job(row['id'])
+        mid=self.s.store.job(row['id'])['telegram_message_id']
+        self.file(row); self.s.ask_choice(self.s.store.job(row['id']))
+        self.s.handle_callback(1,'quality:'+row['id'],mid)
+        self.s.handle_callback(1,'back:'+row['id'],mid)
+        self.s.handle_callback(1,'file:'+row['id'],mid)
+        self.s.run_job(self.s.store.job(row['id']))
+        self.s.tg.say.assert_called_once()
+        self.s.tg.document.assert_called_once()
+        self.assertTrue(all(c.args[1]==mid for c in self.s.tg.edit.call_args_list))
+        self.assertEqual(self.last_card()[1],[])
+        self.assertEqual(self.s.store.job(row['id'])['state'],'done')
+        self.assertNotIn(row['id'],self.last_card()[0])
+
+    def test_completed_and_double_clicks_acknowledge_without_new_messages(self):
+        row=self.job(); self.file(row); self.s.ask_choice(self.s.store.job(row['id']))
+        row=self.s.store.job(row['id'])
+        self.callback(row,'file')
+        self.callback(row,'file')
+        self.assertEqual(self.s.tg.say.call_count,1)
+        self.assertIn('обрабатываю',self.s.tg.call.call_args.kwargs['text'])
+        self.s.deliver(self.s.store.job(row['id']))
+        for action in ('file','quality','height:720','cancel'):
+            if action=='height:720':
+                result=self.s.handle_callback(2,'height:'+row['id']+':720',row['telegram_message_id'])
+                self.assertIn('уже отправлено',result)
+            else:
+                self.callback(row,action)
+                self.assertIn('уже отправлено',self.s.tg.call.call_args.kwargs['text'])
+        self.assertEqual(self.s.tg.say.call_count,1)
+        self.assertEqual(self.s.store.job(row['id'])['cancelled'],0)
+
+    def test_foreign_old_card_cannot_replace_current_card_or_choose_quality(self):
+        row=self.job(); self.file(row); self.s.ask_choice(self.s.store.job(row['id']))
+        row=self.s.store.job(row['id'])
+        self.callback(row,'file',message_id=row['telegram_message_id']+1)
+        self.assertEqual(self.s.store.job(row['id'])['state'],'choice')
+        self.assertIn('устарела',self.s.tg.call.call_args.kwargs['text'])
+        self.callback(row,'file',uid=3,message_id=row['telegram_message_id'])
+        self.assertEqual(self.s.store.job(row['id'])['state'],'choice')
+        self.assertEqual(self.s.store.job(row['id'])['telegram_message_id'],row['telegram_message_id'])
+        self.assertEqual(self.s.tg.say.call_count,1)
+
+    def test_old_completed_card_clears_buttons_without_resending_file(self):
+        row=self.job(); self.s.store.update(row['id'],state='done')
+        self.callback(row,'quality',message_id=999)
+        self.s.tg.say.assert_not_called(); self.s.tg.document.assert_not_called()
+        self.assertEqual(self.s.tg.call.call_args.kwargs['text'],'Видео уже отправлено.')
+        self.assertEqual(self.s.tg.call.call_args_list[0].args[0],'editMessageReplyMarkup')
+
+    def test_unavailable_delivery_buttons_are_hidden_and_size_is_still_visible(self):
+        row=self.job(); self.file(row,1200); self.s.ask_choice(self.s.store.job(row['id']))
+        buttons=str(self.last_card()[1])
+        self.assertNotIn('link:',buttons); self.assertIn('file:',buttons)
+        self.assertLess(len(self.last_card()[0]),180)
+        self.s.store.update(row['id'],size=self.s.tg.limit+1)
+        self.s.show_job(row['id'])
+        buttons=str(self.last_card()[1])
+        self.assertNotIn('file:',buttons); self.assertNotIn('link:',buttons)
+        self.assertIn('quality:',buttons)
+        self.s.youtube=Mock(); self.s.youtube.ready.return_value=True
+        self.s.show_job(row['id'])
+        self.assertIn('link:',str(self.last_card()[1]))
+
+    def test_error_card_hides_raw_diagnostics_and_keeps_them_in_audit(self):
+        row=self.job(uid=1); self.s.show_job(row['id'])
+        raw='ERROR: [site] extractor failed; report this issue on yt-dlp; internal-id-123'
+        self.s.media=Mock(side_effect=ValueError(raw))
+        self.s.run_job(row)
+        self.assertEqual(self.s.store.job(row['id'])['error'],raw)
+        self.assertNotIn('ERROR',self.last_card()[0]); self.assertNotIn('internal-id',self.last_card()[0])
+        self.assertLess(len(self.last_card()[0]),180)
+        self.assertEqual(self.last_card()[1],[])
+        self.s.tg.say.assert_called_once()
+
+    def test_failed_edit_never_sends_a_duplicate_card(self):
+        row=self.job(); self.s.show_job(row['id'])
+        self.s.tg.edit.side_effect=ValueError('Telegram временно недоступен')
+        self.assertIsNone(self.s.show_job(row['id']))
+        self.s.tg.say.assert_called_once()
+        self.assertGreater(self.s.store.job(row['id'])['telegram_message_id'],0)
+
+    def test_unconfirmed_link_card_preserves_file_for_review(self):
+        row=self.job(uid=1,mode='link'); p=self.file(row); self.s.show_job(row['id'])
+        self.s.youtube=Mock(); self.s.youtube.upload.return_value='verified-video'
+        self.s.tg.edit.side_effect=ValueError('Telegram не ответил')
+        self.s.run_job(self.s.store.job(row['id']))
+        self.assertEqual(self.s.store.job(row['id'])['state'],'review')
+        self.assertTrue(p.exists())
+        self.s.tg.say.assert_called_once()
+
+    def test_card_id_survives_restart_and_expiry_removes_old_buttons(self):
+        row=self.job(); self.file(row); self.s.ask_choice(self.s.store.job(row['id']))
+        mid=self.s.store.job(row['id'])['telegram_message_id']
+        self.s.store.db.close()
+        self.s.store=Store(self.s.state/'jobs.sqlite3',(self.s.state/'secret.key').read_bytes(),1)
+        self.s.store.update(row['id'],expires=time.time()-1)
+        self.s.cleanup()
+        self.assertEqual(self.s.store.job(row['id'])['telegram_message_id'],mid)
+        self.assertEqual(self.s.store.job(row['id'])['state'],'expired')
+        self.assertEqual(self.last_card()[1],[])
+        self.s.tg.say.assert_called_once()
+
+    def test_telegram_edit_explicitly_clears_keyboard_and_ignores_no_change(self):
+        tg=Telegram('test-only'); tg.call=Mock(return_value={'message_id':123})
+        tg.edit(1,123,'Готово')
+        self.assertEqual(tg.call.call_args.args[0],'editMessageText')
+        self.assertEqual(tg.call.call_args.kwargs['reply_markup'],{'inline_keyboard':[]})
+        tg.call.side_effect=ValueError('Bad Request: message is not modified')
+        self.assertEqual(tg.edit(1,123,'Готово'),{'message_id':123})
 
 
 if __name__=='__main__': unittest.main()

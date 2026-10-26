@@ -25,7 +25,7 @@ from server.youtube import YouTube
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024*1024
 GIB = 1024*MIB
-VERSION = '2.0.0-preview.5'
+VERSION = '2.0.0-preview.6'
 FILE_TTL = 24*60*60
 LABELS = {'queued':'В очереди','inspecting':'Проверяем ссылку','choice':'Ожидает выбора',
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
@@ -63,6 +63,15 @@ class Telegram:
         if buttons:
             args['reply_markup'] = {'inline_keyboard':buttons}
         return self.call('sendMessage', **args)
+
+    def edit(self, uid, message_id, text, buttons=None):
+        try:
+            return self.call('editMessageText',chat_id=uid,message_id=message_id,text=text[:4000],
+                link_preview_options={'is_disabled':True},reply_markup={'inline_keyboard':buttons or []})
+        except ValueError as error:
+            if 'message is not modified' in str(error).lower():
+                return {'message_id':message_id}
+            raise
 
     def document(self, uid, path, caption=''):
         if path.stat().st_size > self.limit:
@@ -112,6 +121,7 @@ class Service:
         self.worker_seen = self.started
         self.poll_seen = 0
         self.last_error = ''
+        self.ui_lock = threading.RLock()
 
     def notify(self, uid, text, buttons=None):
         try:
@@ -122,33 +132,128 @@ class Service:
 
     def choice_buttons(self, row):
         jid = row['id']
-        return [[{'text':'Получить ссылку','callback_data':'link:'+jid},
-                 {'text':'Получить файл','callback_data':'file:'+jid}],
-                [{'text':'Качество и формат','callback_data':'quality:'+jid},
-                 {'text':'Отменить','callback_data':'cancel:'+jid}]]
+        receive = []
+        if self.youtube.ready() and row['format'] in ('mp4','mkv'):
+            receive.append({'text':'Получить ссылку','callback_data':'link:'+jid})
+        if self.base or (row['entrypoint']=='telegram' and row['size']<=self.tg.limit):
+            receive.append({'text':'Получить файл','callback_data':'file:'+jid})
+        return ([receive] if receive else [])+[
+            [{'text':'Качество и формат','callback_data':'quality:'+jid},
+             {'text':'Отменить','callback_data':'cancel:'+jid}]]
 
     @staticmethod
     def media_note(row):
         media = json.loads(row['metadata']).get('downloadedMedia',{})
         parts = []
         if media.get('width') and media.get('height'):
-            parts.append(f"Размер кадра: {media['width']}×{media['height']}.")
+            parts.append(f"{media['width']}×{media['height']}")
         if media.get('quicktimeWarning'):
-            parts.append('Исходный формат файла может не поддерживаться QuickTime. Для просмотра потребуется совместимый плеер. Дополнительное сжатие не выполнялось.')
+            parts.append('Если QuickTime показывает только звук, откройте в другом плеере.')
         return '\n'.join(parts)
+
+    @staticmethod
+    def user_error(error):
+        message = str(error).lower()
+        if 'youtube' in message and ('ip сервера' in message or 'not a bot' in message):
+            return 'YouTube пока не разрешает скачать этот ролик с сервера.'
+        if any(s in message for s in ('требует входа','подтверждения доступа','login','sign in')):
+            return 'Для этого видео нужен вход на сайт. По одной ссылке скачать его пока нельзя.'
+        if 'drm' in message:
+            return 'Это видео защищено от скачивания.'
+        if 'tiktok' in message:
+            return 'Сейчас не удалось скачать этот ролик из TikTok.'
+        if 'youtube' in message and ('подключ' in message or 'oauth' in message):
+            return 'Загрузка на YouTube ещё не подключена.'
+        if any(s in message for s in ('лимит','временного места','больше лимита')):
+            return 'Файл слишком большой для текущего способа получения. Выберите качество ниже.'
+        if 'telegram' in message:
+            return 'Не удалось подтвердить отправку. Проверьте, появился ли файл в чате.'
+        if len(str(error))<=160 and re.search('[А-Яа-я]',str(error)) and not re.search(r'ERROR|Traceback|https?://|yt-dlp|exception',str(error),re.I):
+            return str(error)
+        return 'Не удалось получить видео. Попробуйте другую ссылку.'
+
+    def quality_card(self, row):
+        info = json.loads(row['metadata'])
+        heights = [0]+[h for h in info.get('heights',[]) if isinstance(h,int) and 0<h<=16384]
+        buttons = []
+        if row['format'] in ('mp4','mkv'):
+            for h in heights:
+                if h and row['height']==0 and row['size'] and h==info.get('downloadedMedia',{}).get('height'):
+                    continue  # The same source quality is already available as "Best".
+                estimate = info.get('qualitySizes',{}).get(str(h),{}).get('bytes')
+                if h == row['height'] and row['size'] and json.loads(row['files']):
+                    weight = size_text(row['size'])
+                else:
+                    weight = '≈ '+size_text(estimate) if estimate else 'размер неизвестен'
+                label = 'Лучшее' if h==0 else f'до {h}p'
+                buttons.append({'text':f'{label} · {weight}','callback_data':f'height:{row["id"]}:{h}'})
+        text = f"Качество и формат · {row['format'].upper()}\n≈ — примерный размер."
+        if row['format'] in ('mp3','m4a'):
+            text = f"{row['format'].upper()} · только звук\nРазмер: "+(size_text(row['size']) if row['size'] and json.loads(row['files']) else 'после скачивания')
+        keyboard = [buttons[i:i+2] for i in range(0,len(buttons),2)]+[
+            [{'text':fmt.upper(),'callback_data':f'format:{row["id"]}:{fmt}'} for fmt in ('mp4','mkv','mp3','m4a')],
+            [{'text':'Назад','callback_data':'back:'+row['id']}]]
+        return text,keyboard
+
+    def job_card(self, row, view='status'):
+        title = re.sub(r'\s+',' ',row['title']).strip()[:90] or 'Видео'
+        state = row['state']
+        if view=='quality' and state=='choice':
+            return self.quality_card(row)
+        if (view=='result' or state=='done') and row['mode']=='link' and row['youtube_id']:
+            return title+'\nГотово · доступ по ссылке',[[{'text':'Открыть видео','url':'https://youtu.be/'+row['youtube_id']}]]
+        if (view=='result' or state=='done') and row['mode']=='file' and row['expires'] and json.loads(row['files']) and self.base:
+            buttons = [[{'text':f'Скачать файл {i+1}','url':item['url']}] for i,item in enumerate(self.file_links(row))]
+            return title+f"\nСкачать до {local_time(row['expires'])} (Минск)",buttons
+        if state=='choice':
+            parts=[title]
+            if row['size'] and json.loads(row['files']):
+                media=json.loads(row['metadata']).get('downloadedMedia',{})
+                dimensions=f"{media['width']}×{media['height']} · " if media.get('width') and media.get('height') else ''
+                parts.append(dimensions+size_text(row['size']))
+            else:
+                parts.append(row['format'].upper()+' · '+(f"до {row['height']}p" if row['height'] else 'лучшее качество'))
+            if not self.base and row['size']>self.tg.limit:
+                parts.append('Больше лимита Telegram. Выберите качество ниже; ссылки на большие файлы ещё не настроены.')
+            return '\n'.join(parts),self.choice_buttons(row)
+        if state in ('error','review'):
+            message = 'Не удалось подтвердить отправку. Проверьте результат в чате.' if state=='review' else self.user_error(row['error'])
+            return title+'\n'+message,[]
+        status = {'queued':'Обрабатываю…','inspecting':'Проверяю ссылку…','downloading':'Скачиваю…',
+                  'uploading':'Загружаю на YouTube…','delivering':'Отправляю…','done':'Готово · файл в чате',
+                  'cancelled':'Отменено','expired':'Срок хранения истёк'}.get(state,'Обрабатываю…')
+        active = state in ('queued','inspecting','downloading','uploading','delivering')
+        if active and row['cancelled']:
+            status = 'Отменяю…'
+        buttons = [[{'text':'Отменить','callback_data':'cancel:'+row['id']}]] if active and not row['cancelled'] else []
+        return title+'\n'+status,buttons
+
+    def show_job(self, jid, view='status'):
+        # All transitions edit one persisted card; a failed edit never creates a second card.
+        with self.ui_lock:
+            row = self.store.job(jid)
+            text,buttons = self.job_card(row,view)
+            try:
+                if row['telegram_message_id']:
+                    return self.tg.edit(row['user_id'],row['telegram_message_id'],text,buttons)
+                response = self.tg.say(row['user_id'],text,buttons)
+                if isinstance(response,dict) and isinstance(response.get('message_id'),int):
+                    self.store.update(jid,telegram_message_id=response['message_id'])
+                return response
+            except ValueError:
+                self.last_error = 'Не удалось обновить карточку задания.'
+                return None
+
+    def clear_keyboard(self, uid, message_id):
+        if message_id:
+            try:
+                self.tg.call('editMessageReplyMarkup',chat_id=uid,message_id=message_id,reply_markup={'inline_keyboard':[]})
+            except ValueError:
+                pass
 
     def ask_choice(self, row):
         self.store.update(row['id'],state='choice',expires=time.time()+FILE_TTL)
-        where = 'Получить ссылку — загрузить на YouTube с доступом «По ссылке».'
-        if not self.youtube.ready():
-            where += ' YouTube пока не подключён.'
-        file_hint = f'Файл — отправка без сжатия в Telegram, до {size_text(self.tg.limit)}.'
-        if self.base:
-            file_hint += ' Более крупный — прямая ссылка на скачивание с сервера на 24 часа.'
-        else:
-            file_hint += ' Для более крупных файлов временные ссылки ещё не подключены.'
-        note = self.media_note(row)
-        self.notify(row['user_id'], f"{row['title']}\nСкачано на сервер: {size_text(row['size'])}.\n{note}\nКак получить видео?\n{where}\n{file_hint}", self.choice_buttons(row))
+        return self.show_job(row['id'])
 
     def handle(self, update):
         callback = update.get('callback_query')
@@ -158,9 +263,10 @@ class Service:
             return
         uid = sender['id']
         u = self.store.user(uid, ' '.join(filter(None,(sender.get('first_name'),sender.get('last_name')))), sender.get('username',''))
-        if callback:
-            self.tg.call('answerCallbackQuery',callback_query_id=callback['id'])
         text = msg.get('text','').strip()
+        if callback and u['role'] not in ('owner','employee'):
+            self.tg.call('answerCallbackQuery',callback_query_id=callback['id'],text='Доступ пока не предоставлен.')
+            return
         if u['role'] == 'pending':
             if text == '/start' and not callback:
                 if not self.store.setting('requested_access_'+str(uid)):
@@ -173,11 +279,20 @@ class Service:
             return
         if u['role'] == 'blocked':
             return
+        if callback:
+            try:
+                result = self.handle_callback(uid,callback.get('data',''),msg.get('message_id'))
+                toast = result if isinstance(result,str) else ''
+            except (ValueError,PermissionError) as error:
+                toast = self.user_error(error)
+            self.tg.call('answerCallbackQuery',callback_query_id=callback['id'],text=toast[:180])
+            return
         try:
-            if callback:
-                return self.handle_callback(uid, callback['data'])
             cmd, _, arg = text.partition(' ')
-            if cmd in ('/start','/help'):
+            if cmd == '/start':
+                return self.notify(uid,'Пришли ссылку на видео или пост. Скачаю в лучшем качестве.\n'
+                    '/history — история · /help — помощь\nВладелец видит историю скачиваний этого бота.')
+            if cmd == '/help':
                 content = ('Пришли ссылку на видео или пост. Сначала скачаю видео на сервер, затем предложу «Получить ссылку» (YouTube) или «Получить файл». Картинки поста отправляю файлами без дополнительного сжатия.\n\n'
                     '/history — мои задания\n/cancel ID — отменить\n'
                     'Владелец видит журнал заданий VideoDrop. Личные чаты и историю браузера бот не читает.')
@@ -242,12 +357,13 @@ class Service:
             urls = re.findall(r'https?://[^\s<>]+', text)
             if len(urls) != 1:
                 raise ValueError('Пришли одну ссылку на видео или пост.')
-            row = self.store.create(uid,clean_source({'url':urls[0]}))
-            self.notify(uid,'Проверяю ссылку. Задание '+row['id'],[[{'text':'Отменить','callback_data':'cancel:'+row['id']}]])
+            with self.ui_lock:
+                row = self.store.create(uid,clean_source({'url':urls[0]}))
+                self.show_job(row['id'])
         except (ValueError,PermissionError) as error:
-            self.notify(uid,str(error))
+            self.notify(uid,self.user_error(error))
 
-    def handle_callback(self, uid, data):
+    def handle_callback(self, uid, data, message_id=None):
         action, _, value = data.partition(':')
         if action in ('approve','block'):
             self.store.set_role(uid,int(value),'employee' if action == 'approve' else 'blocked')
@@ -260,34 +376,39 @@ class Service:
             return self.notify(uid,'\n\n'.join(self.describe(r) for r in self.store.history(uid,employee=int(value),limit=10)) or 'Заданий пока нет.')
         jid = value.split(':')[0]
         row = self.store.job(jid,uid)
+        if message_id and row['user_id']==uid:
+            if row['telegram_message_id'] and row['telegram_message_id']!=message_id:
+                self.clear_keyboard(uid,message_id)
+                return 'Эта кнопка устарела. Используйте последнюю карточку видео.'
+            if not row['telegram_message_id']:
+                self.store.update(jid,telegram_message_id=message_id)
+        if action in ('link','file','quality','height','format','back','cancel'):
+            if row['state'] in ('done','error','review','expired','cancelled'):
+                if message_id:
+                    self.clear_keyboard(uid,message_id)
+                return 'Видео уже отправлено.' if row['state']=='done' else 'Это задание закрыто. Пришлите ссылку заново.'
+            if row['expires'] and row['expires']<=time.time():
+                self.remove_files(row)
+                self.store.update(jid,state='expired',source=None,files='[]',expires=None)
+                self.show_job(jid)
+                return 'Срок хранения истёк. Пришлите ссылку заново.'
+            if action!='cancel' and row['state']!='choice':
+                return 'Уже обрабатываю видео.'
         if action in ('link','file'):
             if action == 'link' and row['format'] not in ('mp4','mkv'):
                 raise ValueError('Для YouTube выбери видео MP4 или MKV. Аудио можно получить файлом.')
             if action == 'link' and not self.youtube.ready():
-                raise ValueError('YouTube ещё не подключён. Пока можно получить файл.')
+                self.show_job(jid)
+                return 'Загрузка на YouTube ещё не подключена.'
+            if action=='file' and not self.base and (row['entrypoint']=='extension' or row['size']>self.tg.limit):
+                self.show_job(jid)
+                return 'Файл больше лимита Telegram. Выберите качество ниже.'
             self.store.choose(jid,uid,action)
-            return self.notify(uid,'Выбор сохранён. Продолжаю обработку.')
+            return self.show_job(jid)
         if action == 'quality':
-            if row['state'] != 'choice':
-                raise ValueError('Качество можно изменить, пока задание ожидает выбора способа получения.')
-            info = json.loads(row['metadata'])
-            heights = [0]+[h for h in info.get('heights',[]) if isinstance(h,int) and 0<h<=16384]
-            buttons = []
-            if row['format'] in ('mp4','mkv'):
-                for h in heights:
-                    estimate = info.get('qualitySizes',{}).get(str(h),{}).get('bytes')
-                    if h == row['height'] and row['size'] and json.loads(row['files']):
-                        weight = size_text(row['size'])
-                    else:
-                        weight = '≈ '+size_text(estimate) if estimate else 'размер неизвестен'
-                    label = 'Лучшее' if h==0 else f'до {h}p'
-                    buttons.append({'text':f'{label} · {weight}','callback_data':f'height:{jid}:{h}'})
-            text = f"Выбран формат {row['format'].upper()}. ≈ — примерный размер видео вместе со звуком; точный — после скачивания."
-            if row['format'] in ('mp3','m4a'):
-                text = f"Выбран формат {row['format'].upper()} — только звук. Размер: "+(size_text(row['size']) if row['size'] and json.loads(row['files']) else 'известен после скачивания')+'.'
-            return self.notify(uid,text+'\nИзменение качества или формата потребует скачать файл заново.',
-                [buttons[i:i+2] for i in range(0,len(buttons),2)]+
-                [[{'text':fmt.upper(),'callback_data':f'format:{jid}:{fmt}'} for fmt in ('mp4','mkv','mp3','m4a')]])
+            return self.show_job(jid,'quality')
+        if action == 'back':
+            return self.show_job(jid)
         if action in ('height','format'):
             setting = value.split(':',1)[1]
             if action == 'height' and int(setting) in [0]+json.loads(row['metadata']).get('heights',[]):
@@ -302,22 +423,23 @@ class Service:
                     raise ValueError('Задание уже выполняется, завершено или срок выбора истёк.')
                 if any(row[k] != v for k,v in change.items()):
                     self.remove_files(row)
-                    self.store.update(jid,**change,files='[]',size=0)
-            return self.notify(uid,'Настройка сохранена. Выбери способ получения.',self.choice_buttons(self.store.job(jid)))
+                    info=json.loads(row['metadata']); info.pop('downloadedMedia',None)
+                    self.store.update(jid,**change,files='[]',size=0,metadata=json.dumps(info))
+            return self.show_job(jid)
         if action == 'cancel':
             self.store.update(jid,cancelled=1)
             if row['state'] in ('choice','queued'):
                 self.remove_files(row)
                 self.store.update(jid,state='cancelled',source=None)
             self.store.event(jid,row['user_id'],'cancelled')
-            return self.notify(uid,'Отмена запрошена.')
+            return self.show_job(jid)
         if action == 'delete':
             if row['state'] not in ('done','error','review','expired','cancelled'):
                 raise ValueError('Сначала отмените активное задание.')
             self.remove_files(row)
             self.store.update(jid,state='expired',source=None,files='[]',expires=None)
             self.store.event(jid,row['user_id'],'file_deleted')
-            return self.notify(uid,'Временный файл удалён. Запись в журнале сохранена.')
+            return self.show_job(jid)
         raise ValueError('Неизвестная кнопка.')
 
     @staticmethod
@@ -422,6 +544,7 @@ class Service:
             if len(paths)!=1 or paths[0].suffix.lower() not in ('.mp4','.mkv'):
                 raise ValueError('YouTube принимает видео. Для картинок и аудио выберите файл.')
             self.store.update(row['id'],state='uploading')
+            self.show_job(row['id'])
             def checkpoint(kind,value):
                 if kind=='video':
                     self.store.update(row['id'],youtube_id=value)
@@ -429,8 +552,9 @@ class Service:
                     self.store.setting('upload_session_'+row['id'],value)
             video = self.youtube.upload(paths[0],row['title'],checkpoint,lambda:self.cancelled(row['id']),row['youtube_id'])
             self.store.event(row['id'],row['user_id'],'youtube_verified',video)
-            self.store.update(row['id'],state='delivering')
-            self.tg.say(row['user_id'],'Готово. Доступ к видео — по ссылке.',[[{'text':'Открыть видео','url':'https://youtu.be/'+video}]])
+            self.store.update(row['id'],state='delivering',youtube_id=video)
+            if not self.show_job(row['id'],'result'):
+                raise ValueError('Не удалось подтвердить отправку ссылки в Telegram.')
             self.store.event(row['id'],row['user_id'],'telegram_link_delivered')
             self.remove_files(row)
             self.store.update(row['id'],state='done',source=None,files='[]',expires=None)
@@ -440,24 +564,25 @@ class Service:
                 raise ValueError(f'Для файла больше лимита Telegram ({size_text(self.tg.limit)}) или задания из расширения нужна прямая HTTPS-ссылка с сервера. Она пока не подключена. Файл сохранён на 24 часа без сжатия.')
             until = time.time()+FILE_TTL
             self.store.update(row['id'],expires=until,state='delivering')
-            buttons = [[{'text':f'Скачать файл {i+1}','url':item['url']}] for i,item in enumerate(self.file_links(self.store.job(row['id'])))]
-            for start in range(0,len(buttons),20):
-                self.tg.say(row['user_id'],f'Файл готов без сжатия. Прямая ссылка действует 24 часа, до {local_time(until)} (Минск).\n'+self.media_note(row),buttons[start:start+20])
+            if not self.show_job(row['id'],'result'):
+                raise ValueError('Не удалось подтвердить отправку ссылки в Telegram.')
             self.store.event(row['id'],row['user_id'],'file_link_delivered')
             self.store.update(row['id'],state='done',source=None)
             return
         self.store.update(row['id'],state='delivering')
+        self.show_job(row['id'])
         for index,path in enumerate(paths):
             if index < row['delivery_index']:
                 continue
             if self.cancelled(row['id']):
                 raise ValueError('Отправка отменена.')
-            caption = '' if len(paths)>1 or json.loads(row['metadata']).get('kind')=='images' else row['title']+'\n'+self.media_note(row)
+            caption = '' if len(paths)>1 or json.loads(row['metadata']).get('kind')=='images' else self.media_note(row)
             self.tg.document(row['user_id'],path,caption)
             self.store.update(row['id'],delivery_index=index+1)
             self.store.event(row['id'],row['user_id'],'telegram_file_delivered',path.name)
         self.remove_files(row)
         self.store.update(row['id'],state='done',source=None,files='[]',expires=None)
+        self.show_job(row['id'])
 
     def run_job(self, row):
         jid = row['id']
@@ -475,6 +600,7 @@ class Service:
                 if self.budget-self.disk_used()<GIB:
                     raise ValueError('На сервере мало временного места. Попробуйте позже.')
                 self.store.update(jid,state='downloading')
+                self.show_job(jid)
                 result = self.media(row,'download')
                 directory = (self.files/jid).resolve()
                 paths = [Path(p) for p in result.get('paths', [result.get('path','')])]
@@ -513,7 +639,7 @@ class Service:
                 self.remove_files(row)
                 self.store.update(jid,files='[]')
             self.store.event(jid,row['user_id'],state,error)
-            self.notify(row['user_id'],error+f'\nЗадание: {jid}')
+            self.show_job(jid)
 
     def cleanup(self):
         # Serialize expiry with choosing a result so an accepted job cannot lose its file.
@@ -524,6 +650,9 @@ class Service:
                 self.store.update(row['id'],state='expired',source=None,files='[]',expires=None)
                 self.store.event(row['id'],row['user_id'],'expired')
             db.execute('DELETE FROM tokens WHERE expires<?',(time.time(),))
+        for row in rows:
+            if row['telegram_message_id']:
+                self.show_job(row['id'])
 
     def cleanup_loop(self):
         # A long download/upload must not postpone removing expired temporary files.

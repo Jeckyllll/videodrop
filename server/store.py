@@ -62,6 +62,8 @@ class Store:
             ''')
             if 'entrypoint' not in {r[1] for r in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute("ALTER TABLE jobs ADD COLUMN entrypoint TEXT NOT NULL DEFAULT 'telegram'")
+            if 'telegram_message_id' not in {r[1] for r in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN telegram_message_id INTEGER NOT NULL DEFAULT 0')
         self.user(owner, 'Владелец', '')
 
     @contextmanager
@@ -151,7 +153,7 @@ class Store:
 
     def update(self, jid, **values):
         allowed = {'state','source','title','mode','height','format','metadata','files','size','error',
-                   'youtube_id','expires','cancelled','delivery_index'}
+                   'youtube_id','expires','cancelled','delivery_index','telegram_message_id'}
         if not values.keys() <= allowed:
             raise ValueError('Invalid job fields')
         values['updated'] = time.time()
