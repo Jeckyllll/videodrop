@@ -1,6 +1,7 @@
 """Isolated yt-dlp worker. Requests/cookies travel over stdin, never command arguments."""
 import http.cookiejar
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -89,7 +90,42 @@ def unwrap(info):
     return info
 
 
-def metadata(info):
+def extract_info(ydl, source):
+    try:
+        return unwrap(ydl.extract_info(source['url'], download=False))
+    except yt_dlp.utils.DownloadError as original:
+        # TikTok sometimes returns unusable HTML to yt-dlp while its public page
+        # is available via a normal GET. Keep native parsing/format selection.
+        match = re.fullmatch(r'https://(?:www\.)?tiktok\.com/@[^/?]+/video/(\d+)/?(?:\?[^#]*)?',source['url'])
+        if not match or 'Unexpected response from webpage request' not in str(original):
+            raise
+        import requests
+        from yt_dlp.extractor.tiktok import TikTokIE
+        try:
+            with requests.Session() as session:
+                session.cookies = ydl.cookiejar
+                with session.get(source['url'],timeout=25,stream=True,allow_redirects=False) as response:
+                    if response.status_code != 200:
+                        raise ValueError('Public page unavailable')
+                    content = bytearray()
+                    for chunk in response.iter_content(65536):
+                        content.extend(chunk)
+                        if len(content) > 6*1024*1024:
+                            raise ValueError('Page too large')
+            extractor = TikTokIE(ydl)
+            detail = extractor._get_universal_data(content.decode('utf-8'),match[1]).get('webapp.video-detail',{})
+            video = detail.get('itemInfo',{}).get('itemStruct',{})
+            if (detail.get('statusCode') != 0 or str(video.get('id')) != match[1]
+                    or not video.get('video') or video.get('isContentClassified') or video.get('privateItem')):
+                raise ValueError('Public video unavailable')
+            raw = extractor._parse_aweme_video_web(video,source['url'],match[1])
+            raw.update(extractor='tiktok',extractor_key='TikTok',webpage_url=source['url'])
+            return unwrap(ydl.process_ie_result(raw,download=False))
+        except (requests.RequestException,ValueError,KeyError,TypeError,yt_dlp.utils.ExtractorError):
+            raise original from None
+
+
+def metadata(info, ydl=None):
     formats = [f for f in info.get("formats", []) if not f.get("has_drm")]
     if not formats:
         if info.get("has_drm"):
@@ -100,7 +136,44 @@ def metadata(info):
     return {"title": info.get("title") or "Видео", "duration": info.get("duration"),
             "heights": heights, "hasVideo": bool(video),
             "hasAudio": any(f.get("acodec") != "none" for f in formats),
-            "extractor": info.get("extractor_key", "Видео"), "formatCount": len(formats)}
+            "extractor": info.get("extractor_key", "Видео"), "formatCount": len(formats),
+            "qualitySizes": quality_sizes(info, formats, heights, ydl) if ydl else {}}
+
+
+def quality_sizes(info, formats, heights, ydl):
+    """Use the same selector as downloads and include every selected audio/video stream.
+
+    Final container overhead is unknown until remuxing, so preflight sizes are estimates.
+    Missing one stream's size must not look like a complete, smaller file.
+    """
+    def positive(value):
+        return isinstance(value, (int, float)) and math.isfinite(value) and value > 0
+
+    def stream_size(stream):
+        for key in ('filesize', 'filesize_approx'):
+            if positive(stream.get(key)):
+                return stream[key]
+        duration = stream.get('duration') or info.get('duration')
+        bitrate = stream.get('tbr')
+        if not positive(bitrate):
+            bitrate = stream.get('abr') if stream.get('vcodec') == 'none' else None
+        if positive(duration) and positive(bitrate):
+            return duration * bitrate * 1000 / 8
+
+    result = {}
+    for height in [0] + heights:
+        selector = ydl.build_format_selector(download_options('mp4', height)['format'])
+        selected = ydl._select_formats(formats, selector)
+        parts = (selected[0].get('requested_formats') or [selected[0]]) if selected else []
+        sizes = [stream_size(part) for part in parts]
+        total = round(sum(sizes)) if sizes and all(s is not None for s in sizes) else None
+        result[str(height)] = {'bytes': total, 'approximate': True}
+        rates = [p.get('tbr') or (p.get('abr') if p.get('vcodec') == 'none' else None) for p in parts]
+        if total is None and rates and all(positive(rate) for rate in rates):
+            # Some sites omit duration. The server can fill the estimate after
+            # probing the first downloaded file, without downloading each quality.
+            result[str(height)]['bytesPerSecond'] = sum(rates)*1000/8
+    return result
 
 
 def download_options(container, height):
@@ -121,8 +194,9 @@ def run(request, validate_download=None):
     if request["mode"] == "inspect":
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.cookiejar = cookie_jar(source.get("cookies", []))
-            info = unwrap(ydl.extract_info(source["url"], download=False))
-        emit("result", **metadata(info))
+            info = extract_info(ydl, source)
+            result = metadata(info, ydl)
+        emit("result", **result)
         return
 
     directory = Path(request["directory"])
@@ -146,7 +220,7 @@ def run(request, validate_download=None):
     with yt_dlp.YoutubeDL(opts) as ydl:
         ydl.cookiejar = cookie_jar(source.get("cookies", []))
         # Reject live streams before the potentially unbounded download starts.
-        info = unwrap(ydl.extract_info(source["url"], download=False))
+        info = extract_info(ydl, source)
         metadata(info)
         ydl.process_ie_result(info, download=True)
     files = [p for p in directory.iterdir() if p.suffix.lower() == "." + request["format"]]

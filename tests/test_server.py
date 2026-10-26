@@ -118,6 +118,21 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(done['files'],'[]')
         self.assertEqual(self.s.store.one("SELECT COUNT(*) n FROM events WHERE job_id=? AND kind='media_verified'",(row['id'],))['n'],1)
 
+    def test_quality_estimate_uses_probed_duration_when_source_omits_it(self):
+        row=self.job()
+        def media(current,mode):
+            if mode=='inspect':
+                return {'kind':'video','heights':[1920,1280], 'qualitySizes':{
+                    '1280':{'bytes':None,'bytesPerSecond':100000,'approximate':True},
+                    '1920':{'bytes':20000000,'approximate':True}}}
+            p=self.file(current)
+            return {'path':str(p),'media':{'duration':52,'videoCodec':'vp9'}}
+        self.s.media=Mock(side_effect=media)
+        self.s.run_job(row)
+        sizes=json.loads(self.s.store.job(row['id'])['metadata'])['qualitySizes']
+        self.assertEqual(sizes['1280']['bytes'],5200000)
+        self.assertEqual(sizes['1920']['bytes'],20000000)
+
     def test_employee_cannot_approve_users_or_export_all_history(self):
         with self.assertRaises(PermissionError):
             self.s.store.set_role(2,3,'employee')
@@ -371,12 +386,36 @@ class ServerTests(unittest.TestCase):
 
     def test_quality_menu_keeps_all_available_resolutions(self):
         row = self.job()
-        self.s.store.update(row['id'], state='choice', metadata=json.dumps({'heights':[2160,1440,1080,720,480,360]}))
+        self.s.store.update(row['id'], state='choice', metadata=json.dumps({'heights':[4320,2160,1920,1440,1080,720,480,360,240]}))
         self.s.handle_callback(2, 'quality:'+row['id'])
         buttons = self.s.tg.say.call_args.args[2]
         labels = [b['text'] for line in buttons for b in line]
-        for height in (2160,1440,1080,720,480,360):
-            self.assertIn(str(height)+'p', labels)
+        for height in (4320,2160,1920,1440,1080,720,480,360,240):
+            self.assertIn(f'до {height}p · размер неизвестен', labels)
+
+    def test_quality_menu_shows_actual_current_size_and_estimates_for_alternatives(self):
+        row=self.job(); self.file(row)
+        self.s.store.update(row['id'],state='choice',size=5*1024*1024,metadata=json.dumps({
+            'heights':[1920,1280,640], 'qualitySizes':{'0':{'bytes':6*1024*1024},
+            '1920':{'bytes':6*1024*1024},'1280':{'bytes':3*1024*1024},'640':{'bytes':None}}}))
+        self.s.handle_callback(2,'quality:'+row['id'])
+        labels=[b['text'] for line in self.s.tg.say.call_args.args[2] for b in line]
+        self.assertIn('Лучшее · 5.0 МБ',labels)
+        self.assertIn('до 1280p · ≈ 3.0 МБ',labels)
+        self.assertIn('до 640p · размер неизвестен',labels)
+        self.s.handle_callback(2,'height:'+row['id']+':1280')
+        self.s.handle_callback(2,'quality:'+row['id'])
+        labels=[b['text'] for line in self.s.tg.say.call_args.args[2] for b in line]
+        self.assertIn('до 1280p · ≈ 3.0 МБ',labels)
+        self.assertNotIn('до 1280p · 5.0 МБ',labels)
+
+    def test_audio_format_does_not_show_video_size_estimates(self):
+        row=self.job(); self.file(row)
+        self.s.store.update(row['id'],state='choice',format='mp3',size=0,files='[]')
+        self.s.handle_callback(2,'quality:'+row['id'])
+        self.assertIn('после скачивания',self.s.tg.say.call_args.args[1])
+        callbacks=[b['callback_data'] for line in self.s.tg.say.call_args.args[2] for b in line]
+        self.assertFalse(any(c.startswith('height:') for c in callbacks))
 
 
 if __name__=='__main__': unittest.main()

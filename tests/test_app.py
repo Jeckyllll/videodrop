@@ -8,14 +8,58 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, MagicMock, patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 import app
 import imageio_ffmpeg
 import yt_dlp
-from worker import cookie_jar, friendly_error, download_options
+from worker import cookie_jar, friendly_error, download_options, metadata, extract_info
+
+
+class TikTokFallbackTests(unittest.TestCase):
+    def setUp(self):
+        self.source={'url':'https://www.tiktok.com/@user/video/123'}
+        self.original=yt_dlp.utils.DownloadError('Unexpected response from webpage request')
+        self.ydl=Mock(cookiejar=cookie_jar([]))
+        self.ydl.extract_info.side_effect=self.original
+
+    def page(self, detail, status=200):
+        session=MagicMock()
+        response=session.__enter__.return_value.get.return_value.__enter__.return_value
+        response.status_code=status
+        payload=json.dumps({'__DEFAULT_SCOPE__':{'webapp.video-detail':detail}})
+        response.iter_content.return_value=[f'<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__">{payload}</script>'.encode()]
+        return session
+
+    def test_public_page_fallback_uses_native_parser_and_does_not_follow_redirects(self):
+        from yt_dlp.extractor.tiktok import TikTokIE
+        detail={'statusCode':0,'itemInfo':{'itemStruct':{'id':'123','video':{'height':1920}}}}
+        session=self.page(detail)
+        self.ydl.process_ie_result.return_value={'id':'123'}
+        with patch('requests.Session',return_value=session), patch.object(TikTokIE,'_parse_aweme_video_web',return_value={'id':'123'}) as parse:
+            self.assertEqual(extract_info(self.ydl,self.source),{'id':'123'})
+        parse.assert_called_once()
+        self.assertFalse(session.__enter__.return_value.get.call_args.kwargs['allow_redirects'])
+
+    def test_private_wrong_id_and_login_redirect_are_not_accepted(self):
+        from yt_dlp.extractor.tiktok import TikTokIE
+        for detail,status in (({'statusCode':10216},200),
+                ({'statusCode':0,'itemInfo':{'itemStruct':{'id':'456','video':{'height':1920}}}},200),
+                ({'statusCode':0,'itemInfo':{'itemStruct':{'id':'123','video':{'height':1920},'isContentClassified':True}}},200),
+                ({},302)):
+            with self.subTest(detail=detail,status=status), patch('requests.Session',return_value=self.page(detail,status)), patch.object(TikTokIE,'_parse_aweme_video_web') as parse:
+                with self.assertRaises(yt_dlp.utils.DownloadError): extract_info(self.ydl,self.source)
+                parse.assert_not_called()
+
+    def test_other_sites_and_authentication_errors_do_not_trigger_fallback(self):
+        with patch('requests.Session') as session:
+            with self.assertRaises(yt_dlp.utils.DownloadError):
+                extract_info(self.ydl,{'url':'https://example.com/@user/video/123'})
+            self.ydl.extract_info.side_effect=yt_dlp.utils.DownloadError('Login required')
+            with self.assertRaises(yt_dlp.utils.DownloadError): extract_info(self.ydl,self.source)
+            session.assert_not_called()
 
 
 class FormatSelectionTests(unittest.TestCase):
@@ -39,6 +83,39 @@ class FormatSelectionTests(unittest.TestCase):
         formats=[self.fmt('aac','m4a','none','aac'),self.fmt('separate-720','mp4','avc1','none',720),
                  self.fmt('combined-1080','mp4','avc1','aac',1080)]
         self.assertEqual(self.select(formats)['format_id'],'combined-1080')
+
+    def sizes(self, formats, duration=10):
+        with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
+            return metadata({'formats':formats,'duration':duration},ydl)['qualitySizes']
+
+    def test_quality_sizes_follow_selected_video_and_audio_not_container(self):
+        formats=[{**self.fmt('aac','m4a','none','aac'),'filesize':50},
+                 {**self.fmt('opus','webm','none','opus'),'filesize':100},
+                 {**self.fmt('720','mp4','avc1','none',720),'filesize':1000},
+                 {**self.fmt('1080','webm','vp9','none',1080),'filesize':3000}]
+        sizes=self.sizes(formats)
+        self.assertEqual(sizes['0'],{'bytes':3100,'approximate':True})
+        self.assertEqual(sizes['720']['bytes'],1100)
+
+    def test_combined_stream_size_does_not_count_audio_twice(self):
+        formats=[{**self.fmt('audio','m4a','none','aac'),'filesize':100},
+                 {**self.fmt('720','mp4','avc1','none',720),'filesize':1000},
+                 {**self.fmt('1080','mp4','avc1','aac',1080),'filesize':3000}]
+        self.assertEqual(self.sizes(formats)['0']['bytes'],3000)
+
+    def test_sizes_use_estimate_or_bitrate_but_never_omit_unknown_audio(self):
+        audio=self.fmt('audio','m4a','none','aac')
+        video={**self.fmt('1080','webm','vp9','none',1080),'filesize_approx':3000}
+        self.assertIsNone(self.sizes([audio,video])['0']['bytes'])
+        self.assertEqual(self.sizes([{**audio,'abr':128},video])['0']['bytes'],163000)
+        self.assertIsNone(self.sizes([{**audio,'abr':float('nan')},video])['0']['bytes'])
+
+    def test_missing_duration_keeps_combined_bitrate_for_later_file_probe(self):
+        formats=[{**self.fmt('audio','m4a','none','aac'),'tbr':64},
+                 {**self.fmt('1080','webm','vp9','none',1080),'tbr':800}]
+        size=self.sizes(formats,duration=None)['0']
+        self.assertIsNone(size['bytes'])
+        self.assertEqual(size['bytesPerSecond'],108000)
 
 
 class ValidationTests(unittest.TestCase):

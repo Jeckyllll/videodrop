@@ -18,14 +18,17 @@ function duration(value) { if (!value) return ''; return value < 60 ? Math.round
 function result(info) {
   current = info; if(info.storage){youtubeControls.set(info.storage);if(info.storage.enabled)youtubeControls.refresh();} $('video-title').textContent = info.title;
   $('video-meta').textContent = [info.extractor, duration(info.duration), info.heights.length ? 'до ' + info.heights[0] + 'p' : 'исходное качество'].filter(Boolean).join(' · ');
-  $('quality').replaceChildren(new Option('Лучшее доступное', '0'), ...info.heights.map(h => new Option(h + 'p', String(h))));
+  $('quality').replaceChildren(...[0, ...info.heights].map(h => {
+    const size = info.qualitySizes?.[String(h)]?.bytes;
+    return new Option((h ? 'до ' + h + 'p' : 'Лучшее доступное') + ' · ' + (size ? '≈ ' + bytes(size) : 'размер неизвестен'), String(h));
+  }));
   for (const option of $('format').options) option.disabled = ['mp4','mkv'].includes(option.value) ? !info.hasVideo : !info.hasAudio;
   $('format').value = info.hasVideo ? 'mp4' : 'mp3';
   updateFormat(); $('result').hidden = false; document.querySelector('.advanced').open=false;
 }
 function updateFormat() {
   const audio = ['mp3','m4a'].includes($('format').value); $('quality').disabled = audio;
-  $('format-hint').textContent = audio ? 'Сохранится только звуковая дорожка. MP3 — 192 кбит/с; M4A сохраняет исходный AAC, когда он доступен.' : 'Лучшее доступное качество не выше выбранного. Видео и звук объединяются автоматически.';
+  $('format-hint').textContent = audio ? 'Сохранится только звуковая дорожка. MP3 — 192 кбит/с; M4A сохраняет исходный AAC, когда он доступен.' : 'Лучшее доступное качество не выше выбранного. ≈ — примерный размер видео вместе со звуком; точный — после скачивания.';
 }
 $('format').addEventListener('change', updateFormat);
 $('lookup').addEventListener('submit', async event => {

@@ -25,7 +25,7 @@ from server.youtube import YouTube
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024*1024
 GIB = 1024*MIB
-VERSION = '2.0.0-preview.4'
+VERSION = '2.0.0-preview.5'
 FILE_TTL = 24*60*60
 LABELS = {'queued':'В очереди','inspecting':'Проверяем ссылку','choice':'Ожидает выбора',
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
@@ -270,14 +270,27 @@ class Service:
         if action == 'quality':
             if row['state'] != 'choice':
                 raise ValueError('Качество можно изменить, пока задание ожидает выбора способа получения.')
-            heights = [0]+[h for h in json.loads(row['metadata']).get('heights',[]) if h in (360,480,720,1080,1440,2160)]
-            buttons = [{'text':'Лучшее' if h==0 else str(h)+'p','callback_data':f'height:{jid}:{h}'} for h in heights]
-            return self.notify(uid,'Выбери качество или формат. Если файл уже скачан, изменение потребует скачать его заново.',
-                [buttons[i:i+4] for i in range(0,len(buttons),4)]+
+            info = json.loads(row['metadata'])
+            heights = [0]+[h for h in info.get('heights',[]) if isinstance(h,int) and 0<h<=16384]
+            buttons = []
+            if row['format'] in ('mp4','mkv'):
+                for h in heights:
+                    estimate = info.get('qualitySizes',{}).get(str(h),{}).get('bytes')
+                    if h == row['height'] and row['size'] and json.loads(row['files']):
+                        weight = size_text(row['size'])
+                    else:
+                        weight = '≈ '+size_text(estimate) if estimate else 'размер неизвестен'
+                    label = 'Лучшее' if h==0 else f'до {h}p'
+                    buttons.append({'text':f'{label} · {weight}','callback_data':f'height:{jid}:{h}'})
+            text = f"Выбран формат {row['format'].upper()}. ≈ — примерный размер видео вместе со звуком; точный — после скачивания."
+            if row['format'] in ('mp3','m4a'):
+                text = f"Выбран формат {row['format'].upper()} — только звук. Размер: "+(size_text(row['size']) if row['size'] and json.loads(row['files']) else 'известен после скачивания')+'.'
+            return self.notify(uid,text+'\nИзменение качества или формата потребует скачать файл заново.',
+                [buttons[i:i+2] for i in range(0,len(buttons),2)]+
                 [[{'text':fmt.upper(),'callback_data':f'format:{jid}:{fmt}'} for fmt in ('mp4','mkv','mp3','m4a')]])
         if action in ('height','format'):
             setting = value.split(':',1)[1]
-            if action == 'height' and int(setting) in (0,240,360,480,720,1080,1440,2160,4320):
+            if action == 'height' and int(setting) in [0]+json.loads(row['metadata']).get('heights',[]):
                 change = {'height':int(setting)}
             elif action == 'format' and setting in ('mp4','mkv','mp3','m4a'):
                 change = {'format':setting}
@@ -473,6 +486,10 @@ class Service:
                     raise ValueError('Файл превышает лимит размера одного задания.')
                 if result.get('media'):
                     info['downloadedMedia'] = result['media']
+                    if result['media'].get('duration'):
+                        for estimate in info.get('qualitySizes',{}).values():
+                            if estimate.get('bytes') is None and estimate.get('bytesPerSecond'):
+                                estimate['bytes'] = round(estimate['bytesPerSecond']*result['media']['duration'])
                     self.store.event(jid,row['user_id'],'media_verified',json.dumps(result['media']))
                 self.store.update(jid,files=json.dumps([str(p.relative_to(directory)) for p in paths]),size=size,metadata=json.dumps(info))
                 self.store.event(jid,row['user_id'],'download_ready',str(size))

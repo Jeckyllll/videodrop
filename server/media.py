@@ -1,6 +1,7 @@
 """Bounded media child process. Never pass credentials on command lines."""
 import ipaddress
 import json
+import math
 import os
 import re
 import socket
@@ -73,6 +74,8 @@ def friendly_error(error):
     message = str(error).lower()
     if 'not a bot' in message:
         return 'YouTube запросил подтверждение входа с IP сервера. Этот ролик сейчас не удалось скачать. Подключение канала для загрузки на YouTube не снимает это ограничение скачивания.'
+    if 'tiktok' in message and 'unexpected response from webpage request' in message:
+        return 'TikTok не отдал доступные данные ролика серверу. Сейчас скачать его не удалось. Попробуйте позже или пришлите другую ссылку.'
     if any(s in message for s in ('403', '401', 'login', 'sign in', 'private video', 'password')):
         return 'Источник требует входа или подтверждения доступа. В текущем режиме бот не получает авторизацию из вашего браузера. Закрытые материалы по одной ссылке недоступны.'
     if 'unsupported url' in message or 'no video formats' in message:
@@ -98,8 +101,15 @@ def validate_download(path, request):
         raise ValueError('В готовом файле нет видеодорожки. Такой файл не будет отправлен как видео.')
     if request['format'] in ('mp3','m4a') and not audio:
         raise ValueError('В готовом файле нет аудиодорожки.')
+    try:
+        duration = float(info.get('format',{}).get('duration'))
+        if not math.isfinite(duration) or duration<=0:
+            duration = None
+    except (TypeError,ValueError):
+        duration = None
     media = {'videoCodec':video.get('codec_name') if video else None,
         'audioCodec':audio.get('codec_name') if audio else None,
+        'duration':duration,
         'width':video.get('width') if video else None,'height':video.get('height') if video else None,
         'quicktimeWarning':bool(request['format']=='mkv'
             or (video and video.get('codec_name') in ('vp8','vp9','av1','theora'))
@@ -150,8 +160,8 @@ def run(request):
     if request['mode'] == 'inspect':
         with yt_dlp.YoutubeDL(worker.options(source)) as ydl:
             ydl.cookiejar = worker.cookie_jar(source['cookies'])
-            info = worker.unwrap(ydl.extract_info(source['url'], download=False))
-            result = worker.metadata(info)
+            info = worker.extract_info(ydl, source)
+            result = worker.metadata(info, ydl)
             result.update(kind='video', size=info.get('filesize') or info.get('filesize_approx'))
             worker.emit('result', **result)
         return
