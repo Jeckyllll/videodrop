@@ -1,0 +1,8 @@
+*
+!worker.py
+!server/
+!server/**
+server/.env
+server/data/
+server/secrets/
+server/**/__pycache__/

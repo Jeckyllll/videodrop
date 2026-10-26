@@ -1,0 +1,6 @@
+Flask>=3.1,<4
+requests>=2.32,<3
+cryptography>=46,<47
+google-auth>=2.40,<3
+google-auth-oauthlib>=1.2,<2
+gallery-dl>=1.30,<2

@@ -12,8 +12,8 @@ import yt_dlp
 from yt_dlp.cookies import YoutubeDLCookieJar
 
 
-def emit(kind, **data):
-    print(json.dumps({"event": kind, **data}, ensure_ascii=False), flush=True)
+def emit(event, **data):
+    print(json.dumps({"event": event, **data}, ensure_ascii=False), flush=True)
 
 
 def friendly_error(error):

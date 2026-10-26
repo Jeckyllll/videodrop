@@ -8,3 +8,8 @@ extension/config.js
 .DS_Store
 dist/
 .pytest_cache/
+.server-state/
+.env
+server/.env
+server/secrets/
+server/data/

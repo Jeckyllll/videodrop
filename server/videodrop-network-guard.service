@@ -1,0 +1,13 @@
+[Unit]
+Description=VideoDrop container network isolation
+Requires=docker.service
+After=docker.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/videodrop-network-guard
+RemainAfterExit=yes
+
+[Install]
+WantedBy=docker.service
