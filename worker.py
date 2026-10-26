@@ -108,17 +108,14 @@ def download_options(container, height):
         return {"format": "bestaudio/best", "postprocessors": [
             {"key": "FFmpegExtractAudio", "preferredcodec": container, "preferredquality": "192"}]}
     ceiling = "[height<=%d]" % height if height else ""
-    # Never silently exceed the chosen resolution. Separate audio is merged by FFmpeg.
-    if container == "mp4":
-        selector = (f"bv{ceiling}[ext=mp4]+ba[ext=m4a]/b{ceiling}[ext=mp4]/"
-                    f"bv{ceiling}+ba/b{ceiling}")
-    else:
-        selector = f"bv{ceiling}+ba/b{ceiling}"
+    # Quality wins over source container/QuickTime support. Remux without re-encoding.
+    # bv* also preserves a better combined stream when the separate video is worse.
+    selector = f"bv*{ceiling}+ba/b{ceiling}"
     return {"format": selector, "merge_output_format": container,
             "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": container}]}
 
 
-def run(request):
+def run(request, validate_download=None):
     source = request["source"]
     opts = options(source)
     if request["mode"] == "inspect":
@@ -155,7 +152,10 @@ def run(request):
     files = [p for p in directory.iterdir() if p.suffix.lower() == "." + request["format"]]
     if len(files) != 1 or not files[0].stat().st_size:
         raise ValueError("Не удалось получить готовый файл. Попробуйте другой формат.")
-    emit("result", path=str(files[0]), size=files[0].stat().st_size)
+    result = {"path": str(files[0]), "size": files[0].stat().st_size}
+    if validate_download is not None:
+        result.update(validate_download(files[0], request))
+    emit("result", **result)
 
 
 if __name__ == "__main__":

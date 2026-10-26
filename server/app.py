@@ -94,7 +94,7 @@ def create_app(service):
         row=service.store.job(jid,uid)
         files=service.file_links(row) if row['state']=='done' and row['mode']=='file' and row['expires'] and row['expires']>time.time() else []
         return jsonify(id=row['id'],state=row['state'],title=row['title'],size=row['size'],error=row['error'],
-            expires=row['expires'],files=files,
+            expires=row['expires'],files=files,media=json.loads(row['metadata']).get('downloadedMedia'),
             youtubeUrl='https://youtu.be/'+row['youtube_id'] if row['state']=='done' and row['youtube_id'] else None)
 
     @app.get('/api/jobs')

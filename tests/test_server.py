@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 from server.app import create_app
 from server.media import clean_source, image_post, public_url, friendly_error
 from server.media import run as run_media
+from server.media import validate_download
 from server.service import Service
 from server.store import Store
 
@@ -73,6 +74,49 @@ class ServerTests(unittest.TestCase):
         message = json.loads(output.getvalue())
         self.assertEqual(message['event'], 'result')
         self.assertEqual(message['kind'], 'images')
+
+    def test_download_validation_rejects_audio_only_and_cover_art_as_video(self):
+        for streams in ([{'codec_type':'audio','codec_name':'aac'}],
+                [{'codec_type':'video','codec_name':'mjpeg','disposition':{'attached_pic':1}},
+                 {'codec_type':'audio','codec_name':'aac'}]):
+            with self.subTest(streams=streams), patch('server.media.subprocess.run',return_value=Mock(stdout=json.dumps({'streams':streams}))):
+                with self.assertRaisesRegex(ValueError,'нет видеодорожки'):
+                    validate_download(Path('video.mp4'),{'format':'mp4'})
+
+    def test_real_codecs_are_reported_and_vp9_is_warned_before_and_after_selection(self):
+        for codec,warning in (('vp9',True),('h264',False)):
+            with self.subTest(codec=codec):
+                probe={'streams':[{'codec_type':'video','codec_name':codec,'width':1080,'height':1920},
+                                  {'codec_type':'audio','codec_name':'aac'}]}
+                with patch('server.media.subprocess.run',return_value=Mock(stdout=json.dumps(probe))):
+                    media=validate_download(Path('video.mp4'),{'format':'mp4'})['media']
+                self.assertEqual(media['quicktimeWarning'],warning)
+                row=self.job(); self.file(row)
+                self.s.store.update(row['id'],metadata=json.dumps({'kind':'video','downloadedMedia':media}))
+                self.s.ask_choice(self.s.store.job(row['id']))
+                choice=self.s.tg.say.call_args.args[1]
+                self.assertIn('1080×1920',choice)
+                self.assertEqual('QuickTime' in choice,warning)
+                self.s.store.choose(row['id'],2,'file')
+                self.s.deliver(self.s.store.job(row['id']))
+                caption=self.s.tg.document.call_args.args[2]
+                self.assertEqual('QuickTime' in caption,warning)
+
+    def test_downloaded_media_metadata_survives_delivery_for_the_audit(self):
+        row=self.job()
+        def media(current,mode):
+            if mode=='inspect':
+                return {'kind':'video','title':'Test','heights':[1920]}
+            p=self.file(current)
+            return {'path':str(p),'media':{'videoCodec':'vp9','audioCodec':'aac','width':1080,'height':1920,'quicktimeWarning':True}}
+        self.s.media=Mock(side_effect=media)
+        self.s.run_job(row)
+        self.s.store.choose(row['id'],2,'file')
+        self.s.run_job(self.s.store.job(row['id']))
+        done=self.s.store.job(row['id'])
+        self.assertEqual(json.loads(done['metadata'])['downloadedMedia']['videoCodec'],'vp9')
+        self.assertEqual(done['files'],'[]')
+        self.assertEqual(self.s.store.one("SELECT COUNT(*) n FROM events WHERE job_id=? AND kind='media_verified'",(row['id'],))['n'],1)
 
     def test_employee_cannot_approve_users_or_export_all_history(self):
         with self.assertRaises(PermissionError):

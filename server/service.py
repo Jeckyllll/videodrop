@@ -25,7 +25,7 @@ from server.youtube import YouTube
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024*1024
 GIB = 1024*MIB
-VERSION = '2.0.0-preview.2'
+VERSION = '2.0.0-preview.4'
 FILE_TTL = 24*60*60
 LABELS = {'queued':'В очереди','inspecting':'Проверяем ссылку','choice':'Ожидает выбора',
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
@@ -127,6 +127,16 @@ class Service:
                 [{'text':'Качество и формат','callback_data':'quality:'+jid},
                  {'text':'Отменить','callback_data':'cancel:'+jid}]]
 
+    @staticmethod
+    def media_note(row):
+        media = json.loads(row['metadata']).get('downloadedMedia',{})
+        parts = []
+        if media.get('width') and media.get('height'):
+            parts.append(f"Размер кадра: {media['width']}×{media['height']}.")
+        if media.get('quicktimeWarning'):
+            parts.append('Исходный формат файла может не поддерживаться QuickTime. Для просмотра потребуется совместимый плеер. Дополнительное сжатие не выполнялось.')
+        return '\n'.join(parts)
+
     def ask_choice(self, row):
         self.store.update(row['id'],state='choice',expires=time.time()+FILE_TTL)
         where = 'Получить ссылку — загрузить на YouTube с доступом «По ссылке».'
@@ -137,7 +147,8 @@ class Service:
             file_hint += ' Более крупный — прямая ссылка на скачивание с сервера на 24 часа.'
         else:
             file_hint += ' Для более крупных файлов временные ссылки ещё не подключены.'
-        self.notify(row['user_id'], f"{row['title']}\nСкачано на сервер: {size_text(row['size'])}. Как получить видео?\n{where}\n{file_hint}", self.choice_buttons(row))
+        note = self.media_note(row)
+        self.notify(row['user_id'], f"{row['title']}\nСкачано на сервер: {size_text(row['size'])}.\n{note}\nКак получить видео?\n{where}\n{file_hint}", self.choice_buttons(row))
 
     def handle(self, update):
         callback = update.get('callback_query')
@@ -418,7 +429,7 @@ class Service:
             self.store.update(row['id'],expires=until,state='delivering')
             buttons = [[{'text':f'Скачать файл {i+1}','url':item['url']}] for i,item in enumerate(self.file_links(self.store.job(row['id'])))]
             for start in range(0,len(buttons),20):
-                self.tg.say(row['user_id'],f'Файл готов без сжатия. Прямая ссылка действует 24 часа, до {local_time(until)} (Минск).',buttons[start:start+20])
+                self.tg.say(row['user_id'],f'Файл готов без сжатия. Прямая ссылка действует 24 часа, до {local_time(until)} (Минск).\n'+self.media_note(row),buttons[start:start+20])
             self.store.event(row['id'],row['user_id'],'file_link_delivered')
             self.store.update(row['id'],state='done',source=None)
             return
@@ -428,7 +439,8 @@ class Service:
                 continue
             if self.cancelled(row['id']):
                 raise ValueError('Отправка отменена.')
-            self.tg.document(row['user_id'],path,'' if len(paths)>1 or json.loads(row['metadata']).get('kind')=='images' else row['title'])
+            caption = '' if len(paths)>1 or json.loads(row['metadata']).get('kind')=='images' else row['title']+'\n'+self.media_note(row)
+            self.tg.document(row['user_id'],path,caption)
             self.store.update(row['id'],delivery_index=index+1)
             self.store.event(row['id'],row['user_id'],'telegram_file_delivered',path.name)
         self.remove_files(row)
@@ -459,7 +471,10 @@ class Service:
                 size = sum(p.stat().st_size for p in paths)
                 if size>self.per_job:
                     raise ValueError('Файл превышает лимит размера одного задания.')
-                self.store.update(jid,files=json.dumps([str(p.relative_to(directory)) for p in paths]),size=size)
+                if result.get('media'):
+                    info['downloadedMedia'] = result['media']
+                    self.store.event(jid,row['user_id'],'media_verified',json.dumps(result['media']))
+                self.store.update(jid,files=json.dumps([str(p.relative_to(directory)) for p in paths]),size=size,metadata=json.dumps(info))
                 self.store.event(jid,row['user_id'],'download_ready',str(size))
                 row = self.store.job(jid)
             if row['mode']=='auto' and info.get('kind')!='images':

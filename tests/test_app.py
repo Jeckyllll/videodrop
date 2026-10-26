@@ -14,7 +14,31 @@ from urllib.request import Request, urlopen
 
 import app
 import imageio_ffmpeg
-from worker import cookie_jar, friendly_error
+import yt_dlp
+from worker import cookie_jar, friendly_error, download_options
+
+
+class FormatSelectionTests(unittest.TestCase):
+    def select(self, formats, height=0):
+        with yt_dlp.YoutubeDL({'quiet':True}) as ydl:
+            return ydl._select_formats(formats,ydl.build_format_selector(download_options('mp4',height)['format']))[0]
+
+    def fmt(self, fid, ext, vcodec, acodec, height=None):
+        return {'format_id':fid,'ext':ext,'vcodec':vcodec,'acodec':acodec,'height':height,
+                'url':'https://example.com/'+fid,'protocol':'https'}
+
+    def test_mp4_does_not_prefer_lower_resolution_or_worse_audio_by_container(self):
+        formats=[self.fmt('aac','m4a','none','mp4a.40.2'),self.fmt('opus','webm','none','opus'),
+                 self.fmt('h264-1080','mp4','avc1','none',1080),self.fmt('vp9-2160','webm','vp9','none',2160)]
+        chosen=self.select(formats)
+        self.assertEqual([f['format_id'] for f in chosen['requested_formats']],['vp9-2160','opus'])
+        capped=self.select(formats,1080)
+        self.assertEqual(capped['requested_formats'][0]['format_id'],'h264-1080')
+
+    def test_higher_quality_combined_stream_wins_over_separate_lower_resolution(self):
+        formats=[self.fmt('aac','m4a','none','aac'),self.fmt('separate-720','mp4','avc1','none',720),
+                 self.fmt('combined-1080','mp4','avc1','aac',1080)]
+        self.assertEqual(self.select(formats)['format_id'],'combined-1080')
 
 
 class ValidationTests(unittest.TestCase):

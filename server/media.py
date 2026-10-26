@@ -4,6 +4,7 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -81,6 +82,31 @@ def friendly_error(error):
     return worker.friendly_error(error)
 
 
+def validate_download(path, request):
+    """Inspect the actual file, rather than trusting its .mp4 extension or extractor metadata."""
+    try:
+        result = subprocess.run(['ffprobe','-v','error','-protocol_whitelist','file,pipe',
+            '-show_entries','stream=codec_name,codec_type,width,height:stream_disposition=attached_pic:format=duration',
+            '-of','json',str(path)],capture_output=True,text=True,timeout=30,check=True)
+        info = json.loads(result.stdout)
+    except (OSError,ValueError,subprocess.SubprocessError):
+        raise ValueError('Не удалось проверить готовый медиафайл. Отправка остановлена.') from None
+    streams = info.get('streams',[])
+    video = next((s for s in streams if s.get('codec_type')=='video' and not s.get('disposition',{}).get('attached_pic')),None)
+    audio = next((s for s in streams if s.get('codec_type')=='audio'),None)
+    if request['format'] in ('mp4','mkv') and not video:
+        raise ValueError('В готовом файле нет видеодорожки. Такой файл не будет отправлен как видео.')
+    if request['format'] in ('mp3','m4a') and not audio:
+        raise ValueError('В готовом файле нет аудиодорожки.')
+    media = {'videoCodec':video.get('codec_name') if video else None,
+        'audioCodec':audio.get('codec_name') if audio else None,
+        'width':video.get('width') if video else None,'height':video.get('height') if video else None,
+        'quicktimeWarning':bool(request['format']=='mkv'
+            or (video and video.get('codec_name') in ('vp8','vp9','av1','theora'))
+            or (audio and audio.get('codec_name') in ('opus','vorbis')))}
+    return {'media':media}
+
+
 def run(request):
     import worker
     import yt_dlp
@@ -129,7 +155,7 @@ def run(request):
             result.update(kind='video', size=info.get('filesize') or info.get('filesize_approx'))
             worker.emit('result', **result)
         return
-    worker.run(request)
+    worker.run(request, validate_download=validate_download)
 
 
 if __name__ == '__main__':
