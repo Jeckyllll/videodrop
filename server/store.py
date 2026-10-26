@@ -60,6 +60,8 @@ class Store:
             CREATE INDEX IF NOT EXISTS jobs_user_created ON jobs(user_id,created);
             CREATE INDEX IF NOT EXISTS events_job ON events(job_id,created);
             ''')
+            if 'entrypoint' not in {r[1] for r in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute("ALTER TABLE jobs ADD COLUMN entrypoint TEXT NOT NULL DEFAULT 'telegram'")
         self.user(owner, 'Владелец', '')
 
     @contextmanager
@@ -109,13 +111,15 @@ class Store:
             db.execute('INSERT INTO events(job_id,user_id,created,kind,detail) VALUES (?,?,?,?,?)',
                        (jid, uid, time.time(), kind, str(detail)[:1000]))
 
-    def create(self, uid, source, mode='auto', container='mp4', height=0):
-        u = self.require(uid)
+    def create(self, uid, source, mode='auto', container='mp4', height=0, entrypoint='telegram'):
+        self.require(uid)
+        if entrypoint not in ('telegram','extension'):
+            raise ValueError('Неизвестный способ создания задания.')
         if mode not in ('auto', 'file', 'link') or container not in ('mp4', 'mkv', 'mp3', 'm4a'):
             raise ValueError('Некорректный формат получения.')
         if height not in (0, 240, 360, 480, 720, 1080, 1440, 2160, 4320):
             raise ValueError('Некорректное разрешение.')
-        if mode == 'link' and container not in ('mp4', 'mkv') and u['role'] == 'owner':
+        if mode == 'link' and container not in ('mp4', 'mkv'):
             raise ValueError('На YouTube можно отправить только видео.')
         jid, now = secrets.token_hex(12), time.time()
         with self.transaction() as db:
@@ -123,9 +127,9 @@ class Store:
             own = db.execute("SELECT COUNT(*) FROM jobs WHERE user_id=? AND state IN ('queued','inspecting','choice','downloading','uploading','delivering')", (uid,)).fetchone()[0]
             if count >= 20 or own >= 3:
                 raise ValueError('Очередь заполнена. Дождитесь завершения предыдущих заданий.')
-            db.execute('INSERT INTO jobs(id,user_id,created,updated,state,source,url,mode,format,height) VALUES (?,?,?,?,?,?,?,?,?,?)',
+            db.execute('INSERT INTO jobs(id,user_id,created,updated,state,source,url,mode,format,height,entrypoint) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                        (jid, uid, now, now, 'queued', self.cipher.encrypt(json.dumps(source).encode()),
-                        audit_url(source['url']), mode, container, height))
+                        audit_url(source['url']), mode, container, height, entrypoint))
         self.event(jid, uid, 'requested')
         return self.job(jid, uid)
 
@@ -159,6 +163,8 @@ class Store:
             row = self.job(jid, uid)
             if mode not in ('file', 'link') or row['state'] != 'choice':
                 raise ValueError('Выбор уже сделан или задание ещё не готово.')
+            if row['expires'] and row['expires'] <= time.time():
+                raise ValueError('Срок хранения файла истёк. Отправьте ссылку заново.')
             self.update(jid, mode=mode, state='queued', expires=None)
             self.event(jid, uid, 'selected', mode)
 
@@ -188,7 +194,7 @@ class Store:
             where += (' AND ' if where else 'WHERE ') + 'j.user_id!=?'
             args.append(self.owner)
         return self.all(f'''SELECT j.id,j.user_id,u.name,u.username,j.url,j.title,j.mode,j.format,j.height,
-                    j.created,j.state,j.size,j.error,j.youtube_id,j.expires,
+                    j.created,j.state,j.size,j.error,j.youtube_id,j.expires,j.entrypoint,
                     (SELECT COUNT(*) FROM events e WHERE e.job_id=j.id AND e.kind='download_started') AS file_requests
                     FROM jobs j JOIN users u ON u.id=j.user_id {where} ORDER BY j.created DESC LIMIT ? OFFSET ?''',
                         (*args, min(limit, 1000), max(offset, 0)))

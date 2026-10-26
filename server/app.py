@@ -81,9 +81,21 @@ def create_app(service):
     @auth()
     def create_job(uid):
         body=request.get_json() or {}
-        row=service.store.create(uid,clean_source(body),mode=body.get('mode','auto'),
-            container=body.get('format','mp4'),height=int(body.get('height',0)))
-        return jsonify(id=row['id'],state=row['state'],message='Задание принято. Результат придёт в Telegram.'),202
+        mode = body.get('mode')
+        if mode not in ('link','file'):
+            raise ValueError('Выберите способ получения до начала скачивания: link (YouTube) или file (файл).')
+        row=service.store.create(uid,clean_source(body),mode=mode,
+            container=body.get('format','mp4'),height=int(body.get('height',0)),entrypoint='extension')
+        return jsonify(id=row['id'],state=row['state'],message='Задание принято.',resultPath='/api/jobs/'+row['id']),202
+
+    @app.get('/api/jobs/<jid>')
+    @auth()
+    def job_result(uid,jid):
+        row=service.store.job(jid,uid)
+        files=service.file_links(row) if row['state']=='done' and row['mode']=='file' and row['expires'] and row['expires']>time.time() else []
+        return jsonify(id=row['id'],state=row['state'],title=row['title'],size=row['size'],error=row['error'],
+            expires=row['expires'],files=files,
+            youtubeUrl='https://youtu.be/'+row['youtube_id'] if row['state']=='done' and row['youtube_id'] else None)
 
     @app.get('/api/jobs')
     @auth()
@@ -127,8 +139,7 @@ def main():
     service=Service(os.environ.get('VIDEODROP_STATE','/data'),owner,
         token=os.environ.get('VIDEODROP_BOT_TOKEN',''),public_base=os.environ.get('VIDEODROP_PUBLIC_URL',''),
         telegram_base=os.environ.get('VIDEODROP_TELEGRAM_URL','https://api.telegram.org'),
-        telegram_local=os.environ.get('VIDEODROP_TELEGRAM_LOCAL')=='1',
-        employee_youtube=os.environ.get('VIDEODROP_EMPLOYEE_YOUTUBE')=='1')
+        telegram_local=os.environ.get('VIDEODROP_TELEGRAM_LOCAL')=='1')
     service.start()
     # Reverse proxy, if added later, must terminate HTTPS. Compose only publishes loopback.
     class QuietHandler(WSGIRequestHandler):

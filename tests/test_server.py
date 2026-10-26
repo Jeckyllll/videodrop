@@ -10,6 +10,7 @@ from server.app import create_app
 from server.media import clean_source, image_post, public_url, friendly_error
 from server.media import run as run_media
 from server.service import Service
+from server.store import Store
 
 
 class ServerTests(unittest.TestCase):
@@ -141,12 +142,101 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(p.exists())
         self.assertEqual(self.s.store.job(row['id'])['state'],'review')
 
-    def test_employees_do_not_upload_to_owner_channel_by_default(self):
+    def test_employee_link_means_youtube_even_when_server_file_links_exist(self):
         row=self.job(mode='link'); p=self.file(row)
+        self.s.base='https://example.com'
         self.s.youtube=Mock()
+        self.s.youtube.upload.return_value='employee-video'
         self.s.run_job(self.s.store.job(row['id']))
-        self.s.youtube.upload.assert_not_called()
+        self.s.youtube.upload.assert_called_once()
+        self.assertFalse(p.exists())
+        self.assertEqual(self.s.store.job(row['id'])['state'],'done')
+        self.assertIn('https://youtu.be/employee-video',str(self.s.tg.say.call_args_list))
+        self.assertNotIn('/download/',str(self.s.tg.say.call_args_list))
+
+    def test_telegram_downloads_video_before_asking_how_to_deliver(self):
+        for duration in (12,3600,None):
+            with self.subTest(duration=duration):
+                row=self.job()
+                def media(current, mode):
+                    if mode=='inspect':
+                        return {'kind':'video','title':'Test','duration':duration,'heights':[1080]}
+                    d=self.s.files/current['id']; d.mkdir()
+                    p=d/'clip.mp4'; p.write_bytes(b'test clip')
+                    return {'paths':[str(p)]}
+                self.s.media=Mock(side_effect=media)
+                self.s.run_job(row)
+                current=self.s.store.job(row['id'])
+                self.assertEqual(current['state'],'choice')
+                self.assertEqual(current['size'],9)
+                self.assertEqual([c.args[1] for c in self.s.media.call_args_list],['inspect','download'])
+                self.s.tg.document.assert_not_called()
+                self.s.handle_callback(2,'file:'+row['id'])
+                self.s.run_job(self.s.store.job(row['id']))
+                self.assertEqual(self.s.media.call_count,2)
+                self.assertEqual(self.s.store.job(row['id'])['state'],'done')
+                self.s.tg.reset_mock()
+
+    def test_large_telegram_file_and_small_extension_file_get_download_links_for_24_hours(self):
+        self.s.base='https://example.com'
+        for entrypoint,size in (('telegram',12),('extension',2)):
+            with self.subTest(entrypoint=entrypoint):
+                self.s.tg.limit=5
+                row=self.job(mode='file',entrypoint=entrypoint); p=self.file(row,size)
+                before=time.time()
+                self.s.deliver(self.s.store.job(row['id']))
+                current=self.s.store.job(row['id'])
+                self.assertEqual(current['state'],'done')
+                self.assertTrue(p.exists())
+                self.assertGreaterEqual(current['expires'],before+86400)
+                self.assertLess(current['expires'],time.time()+86401)
+                self.assertIn('/download/',str(self.s.tg.say.call_args))
+                self.s.tg.document.assert_not_called()
+                self.s.tg.reset_mock()
+
+    def test_unconnected_youtube_never_falls_back_to_server_download_link(self):
+        self.s.base='https://example.com'
+        row=self.job(); p=self.file(row)
+        self.s.store.update(row['id'],state='choice')
+        with self.assertRaisesRegex(ValueError,'YouTube'):
+            self.s.handle_callback(2,'link:'+row['id'])
         self.assertTrue(p.exists())
+        self.assertEqual(self.s.store.job(row['id'])['state'],'choice')
+        self.assertNotIn('/download/',str(self.s.tg.say.call_args_list))
+
+    def test_database_upgrade_preserves_existing_jobs_as_telegram_jobs(self):
+        row=self.job()
+        self.s.store.db.execute('ALTER TABLE jobs DROP COLUMN entrypoint')
+        self.s.store.db.commit()
+        self.s.store.db.close()
+        self.s.store=Store(self.s.state/'jobs.sqlite3',(self.s.state/'secret.key').read_bytes(),1)
+        self.assertEqual(self.s.store.job(row['id'])['entrypoint'],'telegram')
+        self.assertEqual(self.s.store.source(row['id'])['cookies'][0]['value'],'PRIVATE')
+
+    def test_extension_requires_preset_mode_and_result_never_extends_file_expiry(self):
+        self.s.base='https://example.com'
+        client=create_app(self.s).test_client()
+        token=self.s.store.issue(2,'api',600)
+        headers={'Authorization':'Bearer '+token}
+        source={'url':'https://example.com/clip'}
+        with patch('server.app.clean_source',return_value=source):
+            self.assertEqual(client.post('/api/jobs',headers=headers,json=source).status_code,400)
+            response=client.post('/api/jobs',headers=headers,json={**source,'mode':'file','entrypoint':'telegram'})
+        self.assertEqual(response.status_code,202)
+        jid=response.json['id'];row=self.s.store.job(jid)
+        self.assertEqual(row['entrypoint'],'extension')
+        p=self.file(row)
+        self.s.deliver(self.s.store.job(jid))
+        expiry=self.s.store.job(jid)['expires']
+        result=client.get('/api/jobs/'+jid,headers=headers)
+        self.assertEqual(result.status_code,200)
+        self.assertEqual(result.json['expires'],expiry)
+        self.assertEqual(result.json['files'][0]['name'],p.name)
+        self.assertIn('/download/',result.json['files'][0]['url'])
+        foreign=self.s.store.issue(3,'api',600)
+        self.assertEqual(client.get('/api/jobs/'+jid,headers={'Authorization':'Bearer '+foreign}).status_code,403)
+        self.s.store.update(jid,expires=time.time()-1)
+        self.assertEqual(client.get('/api/jobs/'+jid,headers=headers).json['files'],[])
 
     def test_expiry_removes_files_and_tokens_not_history(self):
         row=self.job(); p=self.file(row)
@@ -156,6 +246,36 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(p.exists())
         self.assertEqual(self.s.store.history(1)[0]['state'],'expired')
         with self.assertRaises(PermissionError): self.s.store.resolve(token,'file')
+
+    def test_expired_choice_cannot_reactivate_a_file_before_cleanup(self):
+        row=self.job(); p=self.file(row)
+        self.s.store.update(row['id'],state='choice',expires=time.time()-1)
+        with self.assertRaisesRegex(ValueError,'истёк'):
+            self.s.store.choose(row['id'],2,'file')
+        self.assertEqual(self.s.store.job(row['id'])['state'],'choice')
+        self.s.cleanup()
+        self.assertFalse(p.exists())
+
+    def test_quality_change_preserves_source_and_redownloads_only_after_selection(self):
+        row=self.job(); p=self.file(row)
+        self.s.store.update(row['id'],state='choice',expires=time.time()+86400)
+        self.s.media=Mock()
+        self.s.handle_callback(2,'height:'+row['id']+':720')
+        self.assertFalse(p.exists())
+        self.assertEqual(self.s.store.source(row['id'])['cookies'][0]['value'],'PRIVATE')
+        self.assertEqual(self.s.store.job(row['id'])['state'],'choice')
+        self.s.media.assert_not_called()
+        def download(current,mode):
+            self.assertEqual(mode,'download')
+            self.assertEqual(current['height'],720)
+            self.file(current)
+            return {'paths':[str(p)]}
+        self.s.media.side_effect=download
+        self.s.handle_callback(2,'file:'+row['id'])
+        self.s.run_job(self.s.store.job(row['id']))
+        self.s.media.assert_called_once()
+        self.s.tg.document.assert_called_once()
+        self.assertEqual(self.s.store.job(row['id'])['state'],'done')
 
     def test_restart_does_not_repeat_ambiguous_upload(self):
         row=self.job()

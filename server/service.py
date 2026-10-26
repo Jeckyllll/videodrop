@@ -25,7 +25,8 @@ from server.youtube import YouTube
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024*1024
 GIB = 1024*MIB
-VERSION = '2.0.0-preview.1'
+VERSION = '2.0.0-preview.2'
+FILE_TTL = 24*60*60
 LABELS = {'queued':'В очереди','inspecting':'Проверяем ссылку','choice':'Ожидает выбора',
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
           'done':'Готово','error':'Ошибка','review':'Нужна проверка','cancelled':'Отменено','expired':'Файл удалён по сроку'}
@@ -87,7 +88,7 @@ class Telegram:
 
 class Service:
     def __init__(self, state, owner, token='', public_base='', key=None, telegram_base='https://api.telegram.org',
-                 telegram_local=False, employee_youtube=False):
+                 telegram_local=False):
         self.state = Path(state).resolve()
         self.state.mkdir(parents=True, exist_ok=True)
         os.chmod(self.state, 0o700)
@@ -104,7 +105,6 @@ class Service:
         self.tg = Telegram(token, telegram_base, telegram_local)
         self.base = public_base.rstrip('/')
         self.youtube = YouTube(self.state, self.store.cipher, self.base)
-        self.employee_youtube = employee_youtube
         self.budget = int(os.environ.get('VIDEODROP_STORAGE_GIB',20))*GIB
         self.per_job = int(os.environ.get('VIDEODROP_JOB_GIB',8))*GIB
         self.stop = threading.Event()
@@ -120,9 +120,6 @@ class Service:
             self.last_error = 'Не удалось доставить уведомление Telegram.'
             return None
 
-    def youtube_allowed(self, uid):
-        return self.store.require(uid)['role'] == 'owner' or self.employee_youtube
-
     def choice_buttons(self, row):
         jid = row['id']
         return [[{'text':'Получить ссылку','callback_data':'link:'+jid},
@@ -131,16 +128,16 @@ class Service:
                  {'text':'Отменить','callback_data':'cancel:'+jid}]]
 
     def ask_choice(self, row):
-        self.store.update(row['id'],state='choice',expires=time.time()+21600)
-        where = 'Ссылка — ролик в YouTube с доступом «По ссылке».' if self.youtube_allowed(row['user_id']) else 'Ссылка — временный файл на сервере на 6 часов.'
-        if self.youtube_allowed(row['user_id']) and not self.youtube.ready():
-            where = 'Получение ссылки станет доступно после подключения YouTube.'
-        elif not self.youtube_allowed(row['user_id']) and not self.base:
-            where = 'Получение ссылки пока не подключено.'
+        self.store.update(row['id'],state='choice',expires=time.time()+FILE_TTL)
+        where = 'Получить ссылку — загрузить на YouTube с доступом «По ссылке».'
+        if not self.youtube.ready():
+            where += ' YouTube пока не подключён.'
         file_hint = f'Файл — отправка без сжатия в Telegram, до {size_text(self.tg.limit)}.'
         if self.base:
-            file_hint += ' Более крупный — кнопка скачивания на 6 часов.'
-        self.notify(row['user_id'], f"{row['title']}\nКак получить видео?\n{where}\n{file_hint}", self.choice_buttons(row))
+            file_hint += ' Более крупный — прямая ссылка на скачивание с сервера на 24 часа.'
+        else:
+            file_hint += ' Для более крупных файлов временные ссылки ещё не подключены.'
+        self.notify(row['user_id'], f"{row['title']}\nСкачано на сервер: {size_text(row['size'])}. Как получить видео?\n{where}\n{file_hint}", self.choice_buttons(row))
 
     def handle(self, update):
         callback = update.get('callback_query')
@@ -170,7 +167,7 @@ class Service:
                 return self.handle_callback(uid, callback['data'])
             cmd, _, arg = text.partition(' ')
             if cmd in ('/start','/help'):
-                content = ('Пришли ссылку на видео или пост. Короткие видео и картинки отправляю файлами без дополнительного сжатия. Для больших видео предложу способ получения.\n\n'
+                content = ('Пришли ссылку на видео или пост. Сначала скачаю видео на сервер, затем предложу «Получить ссылку» (YouTube) или «Получить файл». Картинки поста отправляю файлами без дополнительного сжатия.\n\n'
                     '/history — мои задания\n/cancel ID — отменить\n'
                     'Владелец видит журнал заданий VideoDrop. Личные чаты и историю браузера бот не читает.')
                 if u['role'] == 'owner':
@@ -253,32 +250,35 @@ class Service:
         jid = value.split(':')[0]
         row = self.store.job(jid,uid)
         if action in ('link','file'):
-            if action == 'link' and self.youtube_allowed(row['user_id']) and row['format'] not in ('mp4','mkv'):
+            if action == 'link' and row['format'] not in ('mp4','mkv'):
                 raise ValueError('Для YouTube выбери видео MP4 или MKV. Аудио можно получить файлом.')
-            if action == 'link' and self.youtube_allowed(row['user_id']) and not self.youtube.ready():
+            if action == 'link' and not self.youtube.ready():
                 raise ValueError('YouTube ещё не подключён. Пока можно получить файл.')
-            if action == 'link' and not self.youtube_allowed(row['user_id']) and not self.base:
-                raise ValueError('Временные ссылки пока не включены. Можно получить файл в пределах лимита Telegram.')
             self.store.choose(jid,uid,action)
             return self.notify(uid,'Выбор сохранён. Продолжаю обработку.')
         if action == 'quality':
             if row['state'] != 'choice':
-                raise ValueError('Качество выбирается до начала скачивания.')
+                raise ValueError('Качество можно изменить, пока задание ожидает выбора способа получения.')
             heights = [0]+[h for h in json.loads(row['metadata']).get('heights',[]) if h in (360,480,720,1080,1440,2160)]
             buttons = [{'text':'Лучшее' if h==0 else str(h)+'p','callback_data':f'height:{jid}:{h}'} for h in heights]
-            return self.notify(uid,'Выбери качество; формат по умолчанию MP4.',
+            return self.notify(uid,'Выбери качество или формат. Если файл уже скачан, изменение потребует скачать его заново.',
                 [buttons[i:i+4] for i in range(0,len(buttons),4)]+
                 [[{'text':fmt.upper(),'callback_data':f'format:{jid}:{fmt}'} for fmt in ('mp4','mkv','mp3','m4a')]])
         if action in ('height','format'):
-            if row['state'] != 'choice' or json.loads(row['files']):
-                raise ValueError('Файл уже скачан. Для другого качества отправь ссылку заново.')
             setting = value.split(':',1)[1]
             if action == 'height' and int(setting) in (0,240,360,480,720,1080,1440,2160,4320):
-                self.store.update(jid,height=int(setting))
+                change = {'height':int(setting)}
             elif action == 'format' and setting in ('mp4','mkv','mp3','m4a'):
-                self.store.update(jid,format=setting)
+                change = {'format':setting}
             else:
                 raise ValueError('Некорректный выбор.')
+            with self.store.transaction():
+                row = self.store.job(jid,uid)
+                if row['state'] != 'choice' or (row['expires'] and row['expires'] <= time.time()):
+                    raise ValueError('Задание уже выполняется, завершено или срок выбора истёк.')
+                if any(row[k] != v for k,v in change.items()):
+                    self.remove_files(row)
+                    self.store.update(jid,**change,files='[]',size=0)
             return self.notify(uid,'Настройка сохранена. Выбери способ получения.',self.choice_buttons(self.store.job(jid)))
         if action == 'cancel':
             self.store.update(jid,cancelled=1)
@@ -383,9 +383,18 @@ class Service:
         with self.store.transaction() as db:
             db.execute("DELETE FROM tokens WHERE job_id=? AND kind='file'",(row['id'],))
 
+    def file_links(self, row):
+        if not self.base.startswith('https://'):
+            raise ValueError('Временные HTTPS-ссылки на скачивание пока не подключены.')
+        remaining = int((row['expires'] or 0)-time.time())
+        if remaining <= 0:
+            return []
+        return [{'name':p.name, 'url':self.base+'/download/'+self.store.issue(row['user_id'],'file',remaining,row['id'])+'/'+str(i)}
+                for i,p in enumerate(self.paths(row))]
+
     def deliver(self, row):
         paths = self.paths(row)
-        if row['mode']=='link' and self.youtube_allowed(row['user_id']):
+        if row['mode']=='link':
             if len(paths)!=1 or paths[0].suffix.lower() not in ('.mp4','.mkv'):
                 raise ValueError('YouTube принимает видео. Для картинок и аудио выберите файл.')
             self.store.update(row['id'],state='uploading')
@@ -402,13 +411,14 @@ class Service:
             self.remove_files(row)
             self.store.update(row['id'],state='done',source=None,files='[]',expires=None)
             return
-        if any(p.stat().st_size>self.tg.limit for p in paths) or row['mode']=='link':
+        if any(p.stat().st_size>self.tg.limit for p in paths) or row['entrypoint']=='extension':
             if not self.base:
-                raise ValueError(f'Файл больше лимита Telegram ({size_text(self.tg.limit)}). Сжатие не выполнялось. Нужен локальный Telegram Bot API или подключение временных HTTPS-ссылок.')
-            until = time.time()+21600
+                raise ValueError(f'Для файла больше лимита Telegram ({size_text(self.tg.limit)}) или задания из расширения нужна прямая HTTPS-ссылка с сервера. Она пока не подключена. Файл сохранён на 24 часа без сжатия.')
+            until = time.time()+FILE_TTL
             self.store.update(row['id'],expires=until,state='delivering')
-            buttons = [[{'text':f'Скачать файл {i+1}','url':self.base+'/download/'+self.store.issue(row['user_id'],'file',21600,row['id'])+'/'+str(i)}] for i in range(len(paths))]
-            self.tg.say(row['user_id'],f'Файл готов без сжатия. Доступен до {local_time(until)} (Минск).',buttons[:20])
+            buttons = [[{'text':f'Скачать файл {i+1}','url':item['url']}] for i,item in enumerate(self.file_links(self.store.job(row['id'])))]
+            for start in range(0,len(buttons),20):
+                self.tg.say(row['user_id'],f'Файл готов без сжатия. Прямая ссылка действует 24 часа, до {local_time(until)} (Минск).',buttons[start:start+20])
             self.store.event(row['id'],row['user_id'],'file_link_delivered')
             self.store.update(row['id'],state='done',source=None)
             return
@@ -436,8 +446,6 @@ class Service:
                 self.store.update(jid,metadata=json.dumps(info),title=info.get('title','Видео')[:500])
                 row = self.store.job(jid)
             info = json.loads(row['metadata'])
-            if row['mode']=='auto' and info.get('kind')!='images' and (info.get('duration') is None or info['duration']>180):
-                return self.ask_choice(row)
             if not json.loads(row['files']):
                 if self.budget-self.disk_used()<GIB:
                     raise ValueError('На сервере мало временного места. Попробуйте позже.')
@@ -454,7 +462,7 @@ class Service:
                 self.store.update(jid,files=json.dumps([str(p.relative_to(directory)) for p in paths]),size=size)
                 self.store.event(jid,row['user_id'],'download_ready',str(size))
                 row = self.store.job(jid)
-            if row['mode']=='auto' and info.get('kind')!='images' and row['size']>self.tg.limit:
+            if row['mode']=='auto' and info.get('kind')!='images':
                 return self.ask_choice(row)
             if row['mode']=='auto':
                 self.store.update(jid,mode='file')
@@ -476,20 +484,29 @@ class Service:
             self.notify(row['user_id'],error+f'\nЗадание: {jid}')
 
     def cleanup(self):
-        rows = self.store.all("SELECT * FROM jobs WHERE expires<? AND state IN ('done','error','review','choice','cancelled')",(time.time(),))
-        for row in rows:
-            self.remove_files(row)
-            self.store.update(row['id'],state='expired',source=None,files='[]',expires=None)
-            self.store.event(row['id'],row['user_id'],'expired')
+        # Serialize expiry with choosing a result so an accepted job cannot lose its file.
         with self.store.transaction() as db:
+            rows = self.store.all("SELECT * FROM jobs WHERE expires<? AND state IN ('done','error','review','choice','cancelled')",(time.time(),))
+            for row in rows:
+                self.remove_files(row)
+                self.store.update(row['id'],state='expired',source=None,files='[]',expires=None)
+                self.store.event(row['id'],row['user_id'],'expired')
             db.execute('DELETE FROM tokens WHERE expires<?',(time.time(),))
+
+    def cleanup_loop(self):
+        # A long download/upload must not postpone removing expired temporary files.
+        while not self.stop.is_set():
+            try:
+                self.cleanup()
+            except Exception:
+                self.last_error='Не удалось очистить временные файлы. Повтор через 30 секунд.'
+            self.stop.wait(30)
 
     def worker_loop(self):
         self.store.recover()
         while not self.stop.is_set():
             self.worker_seen=time.time()
             try:
-                self.cleanup()
                 row = self.store.one("SELECT * FROM jobs WHERE state='queued' ORDER BY created LIMIT 1")
                 if row:
                     self.run_job(row)
@@ -514,6 +531,7 @@ class Service:
                 self.stop.wait(10)
 
     def start(self):
+        threading.Thread(target=self.cleanup_loop,daemon=True,name='videodrop-cleanup').start()
         threading.Thread(target=self.worker_loop,daemon=True,name='videodrop-worker').start()
         if self.tg.token:
             threading.Thread(target=self.poll_loop,daemon=True,name='videodrop-telegram').start()
