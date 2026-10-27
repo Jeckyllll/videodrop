@@ -13,3 +13,4 @@ dist/
 server/.env
 server/secrets/
 server/data/
+server/web/VideoDrop-Chrome.zip

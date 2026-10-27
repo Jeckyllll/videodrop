@@ -1,11 +1,13 @@
 """Loopback health/API gateway. Public access requires an explicitly configured HTTPS base."""
 import json
 import os
+import re
 import threading
 import time
 from functools import wraps
 
-from flask import Flask, jsonify, redirect, request, send_file
+from flask import Flask, jsonify, redirect, request, send_file, send_from_directory
+from pathlib import Path
 from werkzeug.serving import make_server, WSGIRequestHandler
 
 from server.media import clean_source
@@ -16,6 +18,13 @@ def create_app(service):
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 256*1024
     limits, lock = {}, threading.Lock()
+    web = Path(__file__).with_name('web')
+
+    def body_json():
+        body = request.get_json(silent=True)
+        if not isinstance(body, dict):
+            raise ValueError('Некорректный запрос.')
+        return body
 
     @app.before_request
     def boundary():
@@ -41,11 +50,15 @@ def create_app(service):
         response.headers.update({'Cache-Control':'no-store','Referrer-Policy':'no-referrer',
             'X-Content-Type-Options':'nosniff','Content-Security-Policy':"default-src 'none'; frame-ancestors 'none'"})
         origin = request.headers.get('Origin','')
-        if origin.startswith('chrome-extension://') and len(origin)==51:
+        if re.fullmatch(r'chrome-extension://[a-p]{32}', origin):
             response.headers['Access-Control-Allow-Origin']=origin
             response.headers['Vary']='Origin'
             response.headers['Access-Control-Allow-Headers']='Authorization,Content-Type'
             response.headers['Access-Control-Allow-Methods']='GET,POST,OPTIONS'
+        if request.path.startswith('/app'):
+            response.headers['Content-Security-Policy'] = ("default-src 'none'; script-src 'self'; style-src 'self'; "
+                "connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; "
+                "frame-ancestors 'self' chrome-extension:")
         return response
 
     @app.errorhandler(ValueError)
@@ -75,18 +88,48 @@ def create_app(service):
 
     @app.post('/api/pair')
     def pair():
-        row=service.store.resolve(str((request.get_json() or {}).get('code','')),'pair',consume=True)
+        row=service.store.resolve(str(body_json().get('code','')).strip().lower(),'pair',consume=True)
         return jsonify(token=service.store.issue(row['user_id'],'api',90*86400),
                        role=service.store.get_user(row['user_id'])['role'])
+
+    @app.get('/app/')
+    def browser_app():
+        return send_from_directory(web, 'index.html')
+
+    @app.get('/app/<path:name>')
+    def browser_asset(name):
+        if name not in ('app.js', 'app.css', 'VideoDrop-Chrome.zip'):
+            return '', 404
+        return send_from_directory(web, name, as_attachment=name.endswith('.zip'))
+
+    @app.get('/api/session')
+    @auth()
+    def session(uid):
+        user=service.store.get_user(uid)
+        return jsonify(name=user['name'], role=user['role'], version=VERSION,
+            youtube=service.youtube.ready(), fileTTL=86400,
+            maxFileBytes=service.per_job)
+
+    @app.post('/api/logout')
+    @auth()
+    def logout(uid):
+        from server.store import digest
+        token=request.headers.get('Authorization','').removeprefix('Bearer ')
+        with service.store.transaction() as db:
+            db.execute("DELETE FROM tokens WHERE hash=? AND user_id=? AND kind='api'",(digest(token),uid))
+        return jsonify(ok=True)
 
     @app.post('/api/jobs')
     @auth()
     def create_job(uid):
-        body=request.get_json() or {}
+        body=body_json()
         mode = body.get('mode')
-        if mode not in ('link','file'):
+        prepare = body.get('prepare') is True
+        if not prepare and mode not in ('link','file'):
             raise ValueError('Выберите способ получения до начала скачивания: link (YouTube) или file (файл).')
-        row=service.store.create(uid,clean_source(body),mode=mode,
+        if not prepare and mode=='link' and not service.youtube.ready():
+            raise ValueError('Загрузка на YouTube ещё не подключена. Можно получить файл.')
+        row=service.store.create(uid,clean_source(body),mode='auto' if prepare else mode,
             container=body.get('format','mp4'),height=int(body.get('height',0)),entrypoint='extension')
         return jsonify(id=row['id'],state=row['state'],message='Задание принято.',resultPath='/api/jobs/'+row['id']),202
 
@@ -94,20 +137,62 @@ def create_app(service):
     @auth()
     def job_result(uid,jid):
         row=service.store.job(jid,uid)
+        metadata=json.loads(row['metadata'])
         files=service.file_links(row) if row['state']=='done' and row['mode']=='file' and row['expires'] and row['expires']>time.time() else []
-        return jsonify(id=row['id'],state=row['state'],title=row['title'],size=row['size'],error=row['error'],
+        info={key:metadata.get(key) for key in ('kind','heights','qualitySizes','duration','imageCount') if key in metadata}
+        return jsonify(id=row['id'],state=row['state'],title=row['title'],size=row['size'],error=service.user_error(row['error']) if row['error'] else '',
             expires=row['expires'],files=files,media=json.loads(row['metadata']).get('downloadedMedia'),
+            info=info,format=row['format'],height=row['height'],mode=row['mode'],cancelled=bool(row['cancelled']),
             youtubeUrl='https://youtu.be/'+row['youtube_id'] if row['state']=='done' and row['youtube_id'] else None)
+
+    @app.post('/api/jobs/<jid>/start')
+    @auth()
+    def start_job(uid,jid):
+        body=body_json()
+        with service.store.transaction():
+            row=service.store.job(jid,uid)
+            info=json.loads(row['metadata'])
+            mode,container=body.get('mode'),body.get('format','mp4')
+            height=body.get('height',0)
+            if row['entrypoint']!='extension' or row['state']!='choice' or row['cancelled']:
+                raise ValueError('Задание уже запущено или закрыто.')
+            if mode not in ('file','link') or container not in ('mp4','mkv','mp3','m4a'):
+                raise ValueError('Выберите способ получения и формат.')
+            if type(height) is not int or height not in [0]+info.get('heights',[]):
+                raise ValueError('Выберите доступное качество.')
+            if mode=='link' and (container not in ('mp4','mkv') or info.get('kind')=='images'):
+                raise ValueError('На YouTube можно загрузить только видео.')
+            if mode=='link' and not service.youtube.ready():
+                raise ValueError('Загрузка на YouTube ещё не подключена. Можно получить файл.')
+            service.store.choose(jid,uid,mode)
+            service.store.update(jid,format=container,height=height)
+        return jsonify(id=jid,state='queued'),202
+
+    @app.post('/api/jobs/<jid>/cancel')
+    @auth()
+    def cancel_job(uid,jid):
+        with service.ui_lock:
+            row=service.store.job(jid,uid)
+            if row['entrypoint']!='extension':
+                raise ValueError('Это задание создано в Telegram.')
+            service.handle_callback(uid,'cancel:'+jid)
+        return jsonify(ok=True)
 
     @app.get('/api/jobs')
     @auth()
     def history(uid):
-        return jsonify(jobs=service.store.history(uid,employee=uid))
+        rows=service.store.history(uid,employee=uid)
+        for row in rows:
+            row['error']=service.user_error(row['error']) if row['error'] else ''
+        return jsonify(jobs=rows)
 
     @app.get('/api/audit')
     @auth(owner=True)
     def audit(uid):
-        return jsonify(jobs=service.store.history(uid))
+        rows=service.store.history(uid,employees_only=True)
+        for row in rows:
+            row['error']=service.user_error(row['error']) if row['error'] else ''
+        return jsonify(jobs=rows)
 
     @app.get('/oauth/callback')
     def oauth_callback():

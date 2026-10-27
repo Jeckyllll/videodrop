@@ -4,7 +4,7 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certificates && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY server/requirements.txt /app/server/requirements.txt
-RUN pip install --no-cache-dir -r /app/server/requirements.txt 'yt-dlp[default]>=2026.8.19' 'imageio-ffmpeg>=0.6.0'
+RUN pip install --no-cache-dir -r /app/server/requirements.txt 'yt-dlp[default]==2026.10.21' 'imageio-ffmpeg==0.6.0'
 COPY worker.py /app/worker.py
 COPY server /app/server
 RUN useradd -u 10001 -m -s /usr/sbin/nologin videodrop

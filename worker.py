@@ -175,6 +175,9 @@ def quality_sizes(info, formats, heights, ydl):
         sizes = [stream_size(part) for part in parts]
         total = round(sum(sizes)) if sizes and all(s is not None for s in sizes) else None
         result[str(height)] = {'bytes': total, 'approximate': True}
+        picture = next((p for p in parts if p.get('vcodec') != 'none'), {})
+        if picture.get('width') and picture.get('height'):
+            result[str(height)].update(width=picture['width'],height=picture['height'])
         rates = [p.get('tbr') or (p.get('abr') if p.get('vcodec') == 'none' else None) for p in parts]
         if total is None and rates and all(positive(rate) for rate in rates):
             # Some sites omit duration. The server can fill the estimate after

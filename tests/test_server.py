@@ -305,7 +305,11 @@ class ServerTests(unittest.TestCase):
                 self.assertTrue(p.exists())
                 self.assertGreaterEqual(current['expires'],before+86400)
                 self.assertLess(current['expires'],time.time()+86401)
-                self.assertIn('/download/',str(self.s.tg.mock_calls))
+                if entrypoint == 'telegram':
+                    self.assertIn('/download/',str(self.s.tg.mock_calls))
+                else:
+                    self.s.tg.say.assert_not_called()
+                    self.assertIn('/download/',self.s.file_links(current)[0]['url'])
                 self.s.tg.document.assert_not_called()
                 self.s.tg.reset_mock()
 

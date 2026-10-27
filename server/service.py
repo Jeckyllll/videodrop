@@ -7,10 +7,12 @@ import queue
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -25,7 +27,7 @@ from server.youtube import YouTube
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024*1024
 GIB = 1024*MIB
-VERSION = '2.0.0-preview.7'
+VERSION = '2.0.0-preview.8'
 FILE_TTL = 24*60*60
 LABELS = {'queued':'В очереди','inspecting':'Проверяем ссылку','choice':'Ожидает выбора',
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
@@ -233,6 +235,9 @@ class Service:
         # All transitions edit one persisted card; a failed edit never creates a second card.
         with self.ui_lock:
             row = self.store.job(jid)
+            # Browser tasks are viewed through the authenticated API, not mirrored into Telegram.
+            if row['entrypoint'] == 'extension':
+                return {'ok': True}
             text,buttons = self.job_card(row,view)
             try:
                 if row['telegram_message_id']:
@@ -269,7 +274,7 @@ class Service:
             self.tg.call('answerCallbackQuery',callback_query_id=callback['id'],text='Доступ пока не предоставлен.')
             return
         if u['role'] == 'pending':
-            if text == '/start' and not callback:
+            if text.split(' ', 1)[0] == '/start' and not callback:
                 if not self.store.setting('requested_access_'+str(uid)):
                     self.notify(self.store.owner, f"Запрос доступа: {u['name']} @{u['username']}\nTelegram ID: {uid}",
                         [[{'text':'Разрешить','callback_data':'approve:'+str(uid)},
@@ -290,12 +295,14 @@ class Service:
             return
         try:
             cmd, _, arg = text.partition(' ')
+            if cmd == '/start' and arg == 'connect':
+                cmd = '/pair'
             if cmd == '/start':
                 return self.notify(uid,'Пришли ссылку на видео или пост. Скачаю в лучшем качестве.\n'
                     '/history — история · /help — помощь\nВладелец видит историю скачиваний этого бота.')
             if cmd == '/help':
                 content = ('Пришли ссылку на видео или пост. Сначала скачаю видео на сервер, затем предложу «Получить ссылку» (YouTube) или «Получить файл». Картинки поста отправляю файлами без дополнительного сжатия.\n\n'
-                    '/history — мои задания\n/cancel ID — отменить\n'
+                    '/history — мои задания\n/pair — подключить расширение Chrome\n/cancel ID — отменить\n'
                     'Владелец видит журнал заданий VideoDrop. Личные чаты и историю браузера бот не читает.')
                 if u['role'] == 'owner':
                     content += '\n\n/audit — журнал сотрудников\n/users — сотрудники\n/export — журнал CSV\n/status — состояние\n/youtube — подключение канала'
@@ -451,7 +458,16 @@ class Service:
                 f"ID: {row['id']}")
 
     def disk_used(self, path=None):
-        return sum(p.stat().st_size for p in (path or self.files).rglob('*') if p.is_file() and not p.is_symlink())
+        total = 0
+        for item in (path or self.files).rglob('*'):
+            try:
+                info = item.lstat()
+            except FileNotFoundError:
+                # FFmpeg/yt-dlp rename .part files while the quota scan is running.
+                continue
+            if stat.S_ISREG(info.st_mode):
+                total += info.st_size
+        return total
 
     def cancelled(self, jid):
         return self.stop.is_set() or bool(self.store.job(jid)['cancelled'])
@@ -598,6 +614,9 @@ class Service:
                 self.store.update(jid,metadata=json.dumps(info),title=info.get('title','Видео')[:500])
                 row = self.store.job(jid)
             info = json.loads(row['metadata'])
+            if row['entrypoint'] == 'extension' and row['mode'] == 'auto':
+                # Inspect first: choose quality, size and delivery before downloading bytes.
+                return self.ask_choice(row)
             if not json.loads(row['files']):
                 if self.budget-self.disk_used()<GIB:
                     raise ValueError('На сервере мало временного места. Попробуйте позже.')
@@ -638,6 +657,10 @@ class Service:
                 self.notify(self.store.owner,f"Скачивание сотрудника: {u['name']} @{u['username']}\n{row['title']}\n{row['url']}\n{size_text(row['size'])} · {row['mode']} · готово")
         except Exception as e:
             row = self.store.job(jid)
+            if not isinstance(e,(ValueError,PermissionError)):
+                # Keep useful diagnostics without exception strings, request data or secrets.
+                frames = [f'{Path(f.filename).name}:{f.name}:{f.lineno}' for f in traceback.extract_tb(e.__traceback__)[-6:]]
+                self.store.event(jid,row['user_id'],'internal_error',json.dumps({'type':type(e).__name__,'frames':frames}))
             # Never include raw network exception strings (URLs can contain credentials).
             error = str(e)[:700] if isinstance(e,(ValueError,PermissionError)) else 'Не удалось завершить задание. Файл, если готов, сохранён на 24 часа.'
             state = 'cancelled' if row['cancelled'] else ('review' if row['state'] in ('uploading','delivering') else 'error')

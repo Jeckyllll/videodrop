@@ -4,13 +4,14 @@ services:
     build:
       context: ..
       dockerfile: server/Dockerfile
-    image: videodrop:2.0.0-preview.7
+    image: videodrop:2.0.0-preview.8
     restart: unless-stopped
     env_file: .env
     ports:
       - "127.0.0.1:8787:8080"
     volumes:
       - ./data:/data
+      - ./web:/app/server/web:ro
     read_only: true
     tmpfs:
       - /tmp:size=128m,mode=1777

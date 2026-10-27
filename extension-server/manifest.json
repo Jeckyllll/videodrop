@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "VideoDrop — сервер",
+  "version": "2.0.0",
+  "description": "Скачать видео или картинки через сервер VideoDrop. Локальное приложение не требуется.",
+  "permissions": ["activeTab", "scripting", "storage", "webRequest"],
+  "host_permissions": ["https://videodrop.13-140-180-98.sslip.io/*"],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "optional_permissions": ["cookies"],
+  "background": {"service_worker": "background.js"},
+  "action": {"default_popup": "popup.html", "default_title": "Скачать через VideoDrop"},
+  "content_security_policy": {"extension_pages": "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; frame-src https://videodrop.13-140-180-98.sslip.io; connect-src https://videodrop.13-140-180-98.sslip.io"},
+  "minimum_chrome_version": "120"
+}
