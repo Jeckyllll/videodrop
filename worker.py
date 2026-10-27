@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 import threading
 
@@ -197,12 +198,29 @@ def download_options(container, height):
     if container in ("mp3", "m4a"):
         return {"format": "bestaudio/best", "postprocessors": [
             {"key": "FFmpegExtractAudio", "preferredcodec": container, "preferredquality": "192"}]}
+    if container == "mp4compat":
+        container = "mp4"
     ceiling = "[height<=%d]" % height if height else ""
     # Quality wins over source container/QuickTime support. Remux without re-encoding.
     # bv* also preserves a better combined stream when the separate video is worse.
     selector = f"bv*{ceiling}+ba/b{ceiling}"
     return {"format": selector, "merge_output_format": container,
             "postprocessors": [{"key": "FFmpegVideoRemuxer", "preferedformat": container}]}
+
+
+def convert_compatible(original):
+    """An explicitly requested H.264/AAC copy, retaining the frame dimensions."""
+    converted = original.with_name(original.stem + "-compatible.mp4")
+    result = subprocess.run([shutil.which('ffmpeg') or imageio_ffmpeg.get_ffmpeg_exe(),
+        '-v','error','-nostdin','-i',str(original),'-map','0:v:0','-map','0:a:0?',
+        '-c:v','libx264','-preset','medium','-crf','18','-pix_fmt','yuv420p',
+        '-c:a','aac','-b:a','192k','-movflags','+faststart','-y',str(converted)],
+        stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+    if result.returncode or not converted.is_file() or not converted.stat().st_size:
+        converted.unlink(missing_ok=True)
+        raise ValueError('Не удалось создать совместимый MP4.')
+    original.unlink()
+    return converted
 
 
 def run(request, validate_download=None):
@@ -240,9 +258,12 @@ def run(request, validate_download=None):
         info = extract_info(ydl, source)
         metadata(info)
         ydl.process_ie_result(info, download=True)
-    files = [p for p in directory.iterdir() if p.suffix.lower() == "." + request["format"]]
+    suffix = "mp4" if request["format"] == "mp4compat" else request["format"]
+    files = [p for p in directory.iterdir() if p.suffix.lower() == "." + suffix]
     if len(files) != 1 or not files[0].stat().st_size:
         raise ValueError("Не удалось получить готовый файл. Попробуйте другой формат.")
+    if request["format"] == "mp4compat":
+        files = [convert_compatible(files[0])]
     result = {"path": str(files[0]), "size": files[0].stat().st_size}
     if validate_download is not None:
         result.update(validate_download(files[0], request))

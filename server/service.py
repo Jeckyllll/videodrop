@@ -27,7 +27,7 @@ from server.youtube import YouTube
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024*1024
 GIB = 1024*MIB
-VERSION = '2.0.0-preview.8'
+VERSION = '2.0.0-preview.9'
 FILE_TTL = 24*60*60
 LABELS = {'queued':'В очереди','inspecting':'Проверяем ссылку','choice':'Ожидает выбора',
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
@@ -136,7 +136,7 @@ class Service:
     def choice_buttons(self, row):
         jid = row['id']
         receive = []
-        if self.youtube.ready() and row['format'] in ('mp4','mkv'):
+        if self.youtube.ready() and row['format'] in ('mp4','mp4compat','mkv'):
             receive.append({'text':'Получить ссылку','callback_data':'link:'+jid})
         if self.base or (row['entrypoint']=='telegram' and row['size']<=self.tg.limit):
             receive.append({'text':'Получить файл','callback_data':'file:'+jid})
@@ -179,22 +179,22 @@ class Service:
         info = json.loads(row['metadata'])
         heights = [0]+[h for h in info.get('heights',[]) if isinstance(h,int) and 0<h<=16384]
         buttons = []
-        if row['format'] in ('mp4','mkv'):
+        if row['format'] in ('mp4','mp4compat','mkv'):
             for h in heights:
                 if h and row['height']==0 and row['size'] and h==info.get('downloadedMedia',{}).get('height'):
                     continue  # The same source quality is already available as "Best".
-                estimate = info.get('qualitySizes',{}).get(str(h),{}).get('bytes')
+                estimate = None if row['format']=='mp4compat' else info.get('qualitySizes',{}).get(str(h),{}).get('bytes')
                 if h == row['height'] and row['size'] and json.loads(row['files']):
                     weight = size_text(row['size'])
                 else:
                     weight = '≈ '+size_text(estimate) if estimate else 'размер неизвестен'
                 label = 'Лучшее' if h==0 else f'до {h}p'
                 buttons.append({'text':f'{label} · {weight}','callback_data':f'height:{row["id"]}:{h}'})
-        text = f"Качество и формат · {row['format'].upper()}\n≈ — примерный размер."
+        text = ('Совместимый MP4 · H.264/AAC\nВидео будет перекодировано; разрешение сохраняется.' if row['format']=='mp4compat' else f"Качество и формат · {row['format'].upper()}\n≈ — примерный размер.")
         if row['format'] in ('mp3','m4a'):
             text = f"{row['format'].upper()} · только звук\nРазмер: "+(size_text(row['size']) if row['size'] and json.loads(row['files']) else 'после скачивания')
         keyboard = [buttons[i:i+2] for i in range(0,len(buttons),2)]+[
-            [{'text':fmt.upper(),'callback_data':f'format:{row["id"]}:{fmt}'} for fmt in ('mp4','mkv','mp3','m4a')],
+            [{'text':('MP4 совместимый' if fmt=='mp4compat' else fmt.upper()),'callback_data':f'format:{row["id"]}:{fmt}'} for fmt in ('mp4','mp4compat','mkv','mp3','m4a')],
             [{'text':'Назад','callback_data':'back:'+row['id']}]]
         return text,keyboard
 
@@ -228,7 +228,9 @@ class Service:
         active = state in ('queued','inspecting','downloading','uploading','delivering')
         if active and row['cancelled']:
             status = 'Отменяю…'
-        buttons = [[{'text':'Отменить','callback_data':'cancel:'+row['id']}]] if active and not row['cancelled'] else []
+        buttons = [[{'text':'Выбрать качество','callback_data':'quality:'+row['id']},
+                    {'text':'Отменить','callback_data':'cancel:'+row['id']}]] if active and not row['cancelled'] and row['mode']=='auto' else (
+                  [[{'text':'Отменить','callback_data':'cancel:'+row['id']}]] if active and not row['cancelled'] else [])
         return title+'\n'+status,buttons
 
     def show_job(self, jid, view='status'):
@@ -302,7 +304,7 @@ class Service:
                     '/history — история · /help — помощь\nВладелец видит историю скачиваний этого бота.')
             if cmd == '/help':
                 content = ('Пришли ссылку на видео или пост. Сначала скачаю видео на сервер, затем предложу «Получить ссылку» (YouTube) или «Получить файл». Картинки поста отправляю файлами без дополнительного сжатия.\n\n'
-                    '/history — мои задания\n/pair — подключить расширение Chrome\n/cancel ID — отменить\n'
+                    '/history — мои задания\n/quality ССЫЛКА — выбрать качество\n/pair — подключить расширение Chrome\n/cancel ID — отменить\n'
                     'Владелец видит журнал заданий VideoDrop. Личные чаты и историю браузера бот не читает.')
                 if u['role'] == 'owner':
                     content += '\n\n/audit — журнал сотрудников\n/users — сотрудники\n/export — журнал CSV\n/status — состояние\n/youtube — подключение канала'
@@ -360,6 +362,15 @@ class Service:
                 return self.notify(uid,f'Адрес сервера: {self.base}\nКод расширения: {code}\nДействует 10 минут, один раз. Не пересылай его другим людям.')
             if cmd in ('/cancel','/delete'):
                 return self.handle_callback(uid,cmd[1:]+':'+arg)
+            if cmd == '/quality':
+                urls = re.findall(r'https?://[^\s<>]+', arg)
+                if len(urls) != 1:
+                    raise ValueError('Напиши /quality и одну ссылку на видео.')
+                with self.ui_lock:
+                    row = self.store.create(uid,clean_source({'url':urls[0]}))
+                    self.store.setting('choose_quality_'+row['id'], '1')
+                    self.show_job(row['id'])
+                return
             if cmd.startswith('/'):
                 return self.notify(uid,'Отправь ссылку или нажми /help.')
             urls = re.findall(r'https?://[^\s<>]+', text)
@@ -390,6 +401,9 @@ class Service:
                 return 'Эта кнопка устарела. Используйте последнюю карточку видео.'
             if not row['telegram_message_id']:
                 self.store.update(jid,telegram_message_id=message_id)
+        if action == 'quality' and row['entrypoint']=='telegram' and row['mode']=='auto' and row['state'] in ('queued','inspecting','downloading'):
+            self.store.setting('choose_quality_'+jid, '1')
+            return 'Покажу выбор качества после скачивания.'
         if action in ('link','file','quality','height','format','back','cancel'):
             if row['state'] in ('done','error','review','expired','cancelled'):
                 if message_id:
@@ -403,7 +417,7 @@ class Service:
             if action!='cancel' and row['state']!='choice':
                 return 'Уже обрабатываю видео.'
         if action in ('link','file'):
-            if action == 'link' and row['format'] not in ('mp4','mkv'):
+            if action == 'link' and row['format'] not in ('mp4','mp4compat','mkv'):
                 raise ValueError('Для YouTube выбери видео MP4 или MKV. Аудио можно получить файлом.')
             if action == 'link' and not self.youtube.ready():
                 self.show_job(jid)
@@ -421,7 +435,7 @@ class Service:
             setting = value.split(':',1)[1]
             if action == 'height' and int(setting) in [0]+json.loads(row['metadata']).get('heights',[]):
                 change = {'height':int(setting)}
-            elif action == 'format' and setting in ('mp4','mkv','mp3','m4a'):
+            elif action == 'format' and setting in ('mp4','mp4compat','mkv','mp3','m4a'):
                 change = {'format':setting}
             else:
                 raise ValueError('Некорректный выбор.')
@@ -647,7 +661,10 @@ class Service:
                 self.store.event(jid,row['user_id'],'download_ready',str(size))
                 row = self.store.job(jid)
             if row['mode']=='auto' and info.get('kind')!='images':
-                return self.ask_choice(row)
+                # Telegram can deliver small files immediately without re-encoding.
+                # Larger videos must wait for an explicit delivery choice.
+                if row['entrypoint'] != 'telegram' or row['size'] > self.tg.limit or self.store.setting('choose_quality_'+jid):
+                    return self.ask_choice(row)
             if row['mode']=='auto':
                 self.store.update(jid,mode='file')
                 row = self.store.job(jid)

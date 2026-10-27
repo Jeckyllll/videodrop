@@ -3,6 +3,7 @@ import json
 import tempfile
 import time
 import unittest
+import subprocess
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -12,6 +13,25 @@ from server.media import run as run_media
 from server.media import validate_download
 from server.service import Service, Telegram
 from server.store import Store
+
+
+class CompatibleVideoTests(unittest.TestCase):
+    def test_explicit_conversion_retains_dimensions_and_produces_h264_aac(self):
+        import imageio_ffmpeg
+        from worker import convert_compatible
+        ffmpeg=imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp)/'input.mp4'
+            subprocess.run([ffmpeg,'-v','error','-f','lavfi','-i','testsrc=size=64x96:rate=5',
+                '-f','lavfi','-i','sine=frequency=440','-t','1','-c:v','libvpx-vp9',
+                '-c:a','aac','-y',str(source)],check=True)
+            output=convert_compatible(source)
+            probe=subprocess.run([ffmpeg,'-hide_banner','-i',str(output),'-f','null','-'],capture_output=True,text=True)
+            self.assertEqual(probe.returncode,0)
+            self.assertIn('Video: h264',probe.stderr)
+            self.assertIn('Audio: aac',probe.stderr)
+            self.assertIn('64x96',probe.stderr)
+            self.assertFalse(source.exists())
 
 
 class ServerTests(unittest.TestCase):
@@ -130,8 +150,6 @@ class ServerTests(unittest.TestCase):
             return {'path':str(p),'media':{'videoCodec':'vp9','audioCodec':'aac','width':1080,'height':1920,'quicktimeWarning':True}}
         self.s.media=Mock(side_effect=media)
         self.s.run_job(row)
-        self.s.store.choose(row['id'],2,'file')
-        self.s.run_job(self.s.store.job(row['id']))
         done=self.s.store.job(row['id'])
         self.assertEqual(json.loads(done['metadata'])['downloadedMedia']['videoCodec'],'vp9')
         self.assertEqual(done['files'],'[]')
@@ -269,27 +287,29 @@ class ServerTests(unittest.TestCase):
         self.assertIn('https://youtu.be/employee-video',str(self.s.tg.mock_calls))
         self.assertNotIn('/download/',str(self.s.tg.mock_calls))
 
-    def test_telegram_downloads_video_before_asking_how_to_deliver(self):
-        for duration in (12,3600,None):
-            with self.subTest(duration=duration):
+    def test_small_telegram_video_is_delivered_and_large_video_waits_for_choice(self):
+        for limit,expected in ((9,'done'),(8,'choice')):
+            with self.subTest(limit=limit):
+                self.s.tg.limit=limit
                 row=self.job()
                 def media(current, mode):
                     if mode=='inspect':
-                        return {'kind':'video','title':'Test','duration':duration,'heights':[1080]}
+                        return {'kind':'video','title':'Test','duration':12,'heights':[1080]}
                     d=self.s.files/current['id']; d.mkdir()
                     p=d/'clip.mp4'; p.write_bytes(b'test clip')
                     return {'paths':[str(p)]}
                 self.s.media=Mock(side_effect=media)
                 self.s.run_job(row)
                 current=self.s.store.job(row['id'])
-                self.assertEqual(current['state'],'choice')
+                self.assertEqual(current['state'],expected)
                 self.assertEqual(current['size'],9)
                 self.assertEqual([c.args[1] for c in self.s.media.call_args_list],['inspect','download'])
-                self.s.tg.document.assert_not_called()
-                self.s.handle_callback(2,'file:'+row['id'])
-                self.s.run_job(self.s.store.job(row['id']))
-                self.assertEqual(self.s.media.call_count,2)
-                self.assertEqual(self.s.store.job(row['id'])['state'],'done')
+                if expected=='done':
+                    self.s.tg.document.assert_called_once()
+                    self.assertEqual(current['files'],'[]')
+                else:
+                    self.s.tg.document.assert_not_called()
+                    self.assertTrue(json.loads(current['files']))
                 self.s.tg.reset_mock()
 
     def test_large_telegram_file_and_small_extension_file_get_download_links_for_24_hours(self):
@@ -312,6 +332,21 @@ class ServerTests(unittest.TestCase):
                     self.assertIn('/download/',self.s.file_links(current)[0]['url'])
                 self.s.tg.document.assert_not_called()
                 self.s.tg.reset_mock()
+
+    def test_small_telegram_video_can_wait_for_quality_on_request(self):
+        row=self.job()
+        self.assertIn('выбор качества',self.s.handle_callback(2,'quality:'+row['id']))
+        def media(current, mode):
+            if mode == 'inspect':
+                return {'kind':'video','title':'Test','heights':[1080,720]}
+            folder=self.s.files/current['id'];folder.mkdir()
+            path=folder/'clip.mp4';path.write_bytes(b'test')
+            return {'path':str(path)}
+        self.s.media=Mock(side_effect=media)
+        self.s.run_job(row)
+        self.assertEqual(self.s.store.job(row['id'])['state'],'choice')
+        self.s.tg.document.assert_not_called()
+        self.assertIn('Качество',str(self.last_card()))
 
     def test_unconnected_youtube_never_falls_back_to_server_download_link(self):
         self.s.base='https://example.com'

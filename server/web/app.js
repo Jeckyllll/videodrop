@@ -26,7 +26,7 @@ function pollLater(id){clearTimeout(timer);timer=setTimeout(()=>loadJob(id),2500
 function qualityOptions(row){
   const info=row.info||{},previous=$('quality').value;
   $('quality').replaceChildren(...[0,...(info.heights||[])].map(h=>{
-    const estimate=info.qualitySizes?.[h],dimensions=estimate?.width&&estimate?.height?estimate.width+'×'+estimate.height:('до '+h+'p');
+    const details=info.qualitySizes?.[h],estimate=$('format').value==='mp4compat'?null:details,dimensions=details?.width&&details?.height?details.width+'×'+details.height:('до '+h+'p');
     const option=el('option',(h?dimensions:'Лучшее')+' · '+weight(estimate));option.value=h;return option;
   }));
   $('quality').value=[...$('quality').options].some(o=>o.value===previous)?previous:'0';
@@ -34,13 +34,14 @@ function qualityOptions(row){
 function formatChanged(){
   if(!current)return;
   const audio=['mp3','m4a'].includes($('format').value),images=current.info?.kind==='images';
+  qualityOptions(current);
   $('quality').disabled=audio;
   $('video-options').hidden=images;
   $('youtube').closest('label').hidden=images;
   const youtubeAllowed=!!session?.youtube&&!audio&&!images;
   $('youtube').disabled=!youtubeAllowed;if(!youtubeAllowed)$('youtube').checked=false;
   $('youtube-note').textContent=images?'Из поста будут скачаны только картинки.':!session?.youtube?'Загрузка на YouTube ещё не подключена.':audio?'Аудио можно получить файлом.':'';
-  $('estimate').textContent=audio ? (current.info?.duration?'Размер звука: ≈ '+size(current.info.duration*192000/8):'Размер звука станет известен после скачивания.') : '≈ — оценка видео вместе со звуком. Точный вес — после скачивания.';
+  $('estimate').textContent=$('format').value==='mp4compat' ? 'H.264/AAC: разрешение сохраняется, видео перекодируется. Размер станет известен после скачивания.' : audio ? (current.info?.duration?'Размер звука: ≈ '+size(current.info.duration*192000/8):'Размер звука станет известен после скачивания.') : '≈ — оценка видео вместе со звуком. Точный вес — после скачивания.';
   $('start').textContent=$('youtube').checked?'Скачать и загрузить на YouTube':images?'Скачать картинки':'Скачать файл';
 }
 function renderJob(row){

@@ -117,11 +117,11 @@ class Store:
         self.require(uid)
         if entrypoint not in ('telegram','extension'):
             raise ValueError('Неизвестный способ создания задания.')
-        if mode not in ('auto', 'file', 'link') or container not in ('mp4', 'mkv', 'mp3', 'm4a'):
+        if mode not in ('auto', 'file', 'link') or container not in ('mp4', 'mp4compat', 'mkv', 'mp3', 'm4a'):
             raise ValueError('Некорректный формат получения.')
         if height not in (0, 240, 360, 480, 720, 1080, 1440, 2160, 4320):
             raise ValueError('Некорректное разрешение.')
-        if mode == 'link' and container not in ('mp4', 'mkv'):
+        if mode == 'link' and container not in ('mp4', 'mp4compat', 'mkv'):
             raise ValueError('На YouTube можно отправить только видео.')
         jid, now = secrets.token_hex(12), time.time()
         with self.transaction() as db:

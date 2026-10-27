@@ -97,7 +97,7 @@ def validate_download(path, request):
     streams = info.get('streams',[])
     video = next((s for s in streams if s.get('codec_type')=='video' and not s.get('disposition',{}).get('attached_pic')),None)
     audio = next((s for s in streams if s.get('codec_type')=='audio'),None)
-    if request['format'] in ('mp4','mkv') and not video:
+    if request['format'] in ('mp4','mp4compat','mkv') and not video:
         raise ValueError('В готовом файле нет видеодорожки. Такой файл не будет отправлен как видео.')
     if request['format'] in ('mp3','m4a') and not audio:
         raise ValueError('В готовом файле нет аудиодорожки.')

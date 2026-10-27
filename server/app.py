@@ -156,11 +156,11 @@ def create_app(service):
             height=body.get('height',0)
             if row['entrypoint']!='extension' or row['state']!='choice' or row['cancelled']:
                 raise ValueError('Задание уже запущено или закрыто.')
-            if mode not in ('file','link') or container not in ('mp4','mkv','mp3','m4a'):
+            if mode not in ('file','link') or container not in ('mp4','mp4compat','mkv','mp3','m4a'):
                 raise ValueError('Выберите способ получения и формат.')
             if type(height) is not int or height not in [0]+info.get('heights',[]):
                 raise ValueError('Выберите доступное качество.')
-            if mode=='link' and (container not in ('mp4','mkv') or info.get('kind')=='images'):
+            if mode=='link' and (container not in ('mp4','mp4compat','mkv') or info.get('kind')=='images'):
                 raise ValueError('На YouTube можно загрузить только видео.')
             if mode=='link' and not service.youtube.ready():
                 raise ValueError('Загрузка на YouTube ещё не подключена. Можно получить файл.')
