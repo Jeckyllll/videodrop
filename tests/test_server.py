@@ -4,6 +4,9 @@ import tempfile
 import time
 import unittest
 import subprocess
+import os
+import shutil
+import hashlib
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -16,6 +19,16 @@ from server.store import Store
 
 
 class CompatibleVideoTests(unittest.TestCase):
+    def test_telegram_preview_uses_streamable_video_endpoint(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'preview.mp4'; path.write_bytes(b'video')
+            response=Mock(); response.json.return_value={'ok':True,'result':{'message_id':123}}
+            with patch('server.service.requests.post',return_value=response) as post:
+                result=Telegram('test-token').video(42,path,'Для просмотра')
+            self.assertTrue(post.call_args.args[0].endswith('/sendVideo'))
+            self.assertEqual(post.call_args.kwargs['data']['supports_streaming'],'true')
+            self.assertEqual(result['message_id'],123)
+
     def test_explicit_conversion_retains_dimensions_and_produces_h264_aac(self):
         import imageio_ffmpeg
         from worker import convert_compatible
@@ -139,7 +152,7 @@ class ServerTests(unittest.TestCase):
                 self.s.store.choose(row['id'],2,'file')
                 self.s.deliver(self.s.store.job(row['id']))
                 caption=self.s.tg.document.call_args.args[2]
-                self.assertEqual('QuickTime' in caption,warning)
+                self.assertEqual('VLC' in caption,warning)
 
     def test_downloaded_media_metadata_survives_delivery_for_the_audit(self):
         row=self.job()
@@ -154,6 +167,46 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(json.loads(done['metadata'])['downloadedMedia']['videoCodec'],'vp9')
         self.assertEqual(done['files'],'[]')
         self.assertEqual(self.s.store.one("SELECT COUNT(*) n FROM events WHERE job_id=? AND kind='media_verified'",(row['id'],))['n'],1)
+
+    def test_video_preview_is_playable_and_original_is_unchanged(self):
+        import imageio_ffmpeg
+        ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+        row = self.job()
+        source = self.file(row)
+        subprocess.run([ffmpeg,'-v','error','-f','lavfi','-i','testsrc=size=64x96:rate=5',
+            '-f','lavfi','-i','sine=frequency=440','-t','1','-c:v','libvpx-vp9',
+            '-c:a','aac','-y',str(source)],check=True)
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        self.s.store.update(row['id'],mode='file',size=source.stat().st_size,
+            metadata=json.dumps({'kind':'video','downloadedMedia':{'videoCodec':'vp9','audioCodec':'aac','duration':1}}))
+        preview_copy = Path(self.tmp.name)/'received.mp4'
+        def capture(uid,path,caption):
+            shutil.copyfile(path,preview_copy)
+        self.s.tg.video.side_effect = capture
+        def original(uid,path,caption):
+            self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(),digest)
+        self.s.tg.document.side_effect = original
+        with tempfile.TemporaryDirectory() as bindir:
+            os.symlink(ffmpeg,Path(bindir)/'ffmpeg')
+            with patch.dict(os.environ,{'PATH':bindir+os.pathsep+os.environ.get('PATH','')}):
+                self.s.deliver(self.s.store.job(row['id']))
+        self.s.tg.video.assert_called_once()
+        self.s.tg.document.assert_called_once()
+        probe = subprocess.run([ffmpeg,'-hide_banner','-i',str(preview_copy),'-f','null','-'],capture_output=True,text=True)
+        self.assertEqual(probe.returncode,0)
+        self.assertIn('Video: h264',probe.stderr)
+        self.assertIn('Audio: aac',probe.stderr)
+        self.assertEqual(self.s.store.job(row['id'])['state'],'done')
+
+    def test_preview_failure_does_not_prevent_original_delivery(self):
+        row=self.job(); self.file(row)
+        self.s.store.update(row['id'],mode='file',metadata=json.dumps(
+            {'kind':'video','downloadedMedia':{'videoCodec':'vp9','audioCodec':'aac','duration':1}}))
+        with patch('server.service.subprocess.Popen',side_effect=OSError('unavailable')):
+            self.s.deliver(self.s.store.job(row['id']))
+        self.s.tg.video.assert_not_called()
+        self.s.tg.document.assert_called_once()
+        self.assertEqual(self.s.store.job(row['id'])['state'],'done')
 
     def test_quality_estimate_uses_probed_duration_when_source_omits_it(self):
         row=self.job()

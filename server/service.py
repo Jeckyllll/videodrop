@@ -96,6 +96,24 @@ class Telegram:
         except requests.RequestException:
             raise ValueError('Ответ Telegram не получен. Проверьте чат перед повторной отправкой.') from None
 
+    def video(self, uid, path, caption=''):
+        if path.stat().st_size > self.limit:
+            raise ValueError('Видео для просмотра превышает лимит Telegram.')
+        if self.local:
+            return self.call('sendVideo', chat_id=uid, video='file://'+str(path.resolve()),
+                             caption=caption[:1000], supports_streaming=True)
+        try:
+            with path.open('rb') as f:
+                r = requests.post(f'{self.base}/bot{self.token}/sendVideo',
+                    data={'chat_id':uid,'caption':caption[:1000],'supports_streaming':'true'},
+                    files={'video':(path.name,f,'video/mp4')}, timeout=180)
+            payload = r.json()
+            if not payload.get('ok'):
+                raise ValueError('Telegram не принял видео для просмотра.')
+            return payload['result']
+        except requests.RequestException:
+            raise ValueError('Ответ Telegram не получен. Проверьте чат перед повторной отправкой.') from None
+
 
 class Service:
     def __init__(self, state, owner, token='', public_base='', key=None, telegram_base='https://api.telegram.org',
@@ -151,7 +169,7 @@ class Service:
         if media.get('width') and media.get('height'):
             parts.append(f"{media['width']}×{media['height']}")
         if media.get('quicktimeWarning'):
-            parts.append('Если QuickTime показывает только звук, откройте в другом плеере.')
+            parts.append('Оригинал может не открываться в стандартном плеере; попробуйте VLC.')
         return '\n'.join(parts)
 
     @staticmethod
@@ -570,6 +588,59 @@ class Service:
         return [{'name':p.name, 'url':self.base+'/download/'+self.store.issue(row['user_id'],'file',remaining,row['id'])+'/'+str(i)}
                 for i,p in enumerate(self.paths(row))]
 
+    def preview(self, row, paths):
+        """Make a separate compatible copy; never alter the original media."""
+        info = json.loads(row['metadata'])
+        media = info.get('downloadedMedia',{})
+        if (row['entrypoint'] != 'telegram' or info.get('kind') != 'video'
+                or len(paths) != 1 or not media.get('videoCodec')):
+            return
+        if self.store.one("SELECT 1 FROM events WHERE job_id=? AND kind='telegram_preview_delivered'",(row['id'],)):
+            return
+        preview = paths[0].parent/'.telegram-preview.mp4'
+        # Reserve space for audio and container overhead when targeting the Bot API limit.
+        duration = media.get('duration') or 0
+        target = int(self.tg.limit * 8 * .85 / duration - 96000) if duration else 1800000
+        if target < 80000:
+            self.notify(row['user_id'],'Видео слишком длинное для версии просмотра в Telegram. Отправляю оригинал.')
+            return
+        bitrate = min(target, 900000)
+        args = ['ffmpeg','-nostdin','-v','error','-y','-i',str(paths[0]),
+            '-map','0:v:0','-map','0:a:0?', '-vf',
+            "scale=w='max(2,trunc(iw*min(1,720/max(iw,ih))/2)*2)':h='max(2,trunc(ih*min(1,720/max(iw,ih))/2)*2)'",
+            '-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-profile:v','main',
+            '-crf','28','-maxrate',str(bitrate),'-bufsize',str(bitrate*2),
+            '-c:a','aac','-b:a','96k','-movflags','+faststart',str(preview)]
+        process = None
+        try:
+            process = subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+            deadline = time.monotonic()+7200
+            while process.poll() is None:
+                self.worker_seen = time.time()
+                if self.cancelled(row['id']):
+                    raise ValueError('Отправка отменена.')
+                if (time.monotonic()>deadline or self.disk_used()>self.budget
+                        or self.disk_used(paths[0].parent)>self.per_job or shutil.disk_usage(self.files).free<2*GIB):
+                    raise ValueError('Не удалось подготовить видео для просмотра.')
+                self.stop.wait(1)
+            if process.returncode or not preview.is_file() or preview.stat().st_size > self.tg.limit:
+                raise ValueError('Не удалось подготовить видео для просмотра.')
+            self.tg.video(row['user_id'],preview,'Для просмотра')
+            self.store.event(row['id'],row['user_id'],'telegram_preview_delivered')
+        except (ValueError,OSError):
+            if self.cancelled(row['id']):
+                raise ValueError('Отправка отменена.')
+            self.store.event(row['id'],row['user_id'],'telegram_preview_failed')
+            self.notify(row['user_id'],'Не удалось подготовить видео для просмотра. Отправляю оригинал.')
+        finally:
+            if process and process.poll() is None:
+                os.killpg(process.pid,signal.SIGTERM)
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid,signal.SIGKILL); process.wait()
+            preview.unlink(missing_ok=True)
+
     def deliver(self, row):
         paths = self.paths(row)
         if row['mode']=='link':
@@ -591,6 +662,9 @@ class Service:
             self.remove_files(row)
             self.store.update(row['id'],state='done',source=None,files='[]',expires=None)
             return
+        self.store.update(row['id'],state='delivering')
+        self.show_job(row['id'])
+        self.preview(row, paths)
         if any(p.stat().st_size>self.tg.limit for p in paths) or row['entrypoint']=='extension':
             if not self.base:
                 raise ValueError(f'Для файла больше лимита Telegram ({size_text(self.tg.limit)}) или задания из расширения нужна прямая HTTPS-ссылка с сервера. Она пока не подключена. Файл сохранён на 24 часа без сжатия.')
@@ -608,7 +682,8 @@ class Service:
                 continue
             if self.cancelled(row['id']):
                 raise ValueError('Отправка отменена.')
-            caption = '' if len(paths)>1 or json.loads(row['metadata']).get('kind')=='images' else self.media_note(row)
+            label = 'Оригинал · без дополнительного сжатия' if row['format'] in ('mp4','mkv') else 'Файл · выбранный формат'
+            caption = '' if len(paths)>1 or json.loads(row['metadata']).get('kind')=='images' else '\n'.join(filter(None,(label,self.media_note(row))))
             self.tg.document(row['user_id'],path,caption)
             self.store.update(row['id'],delivery_index=index+1)
             self.store.event(row['id'],row['user_id'],'telegram_file_delivered',path.name)
