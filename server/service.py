@@ -605,7 +605,7 @@ class Service:
             self.notify(row['user_id'],'Видео слишком длинное для версии просмотра в Telegram. Отправляю оригинал.')
             return
         bitrate = min(target, 900000)
-        args = ['ffmpeg','-nostdin','-v','error','-y','-i',str(paths[0]),
+        args = ['ffmpeg','-nostdin','-v','error','-y','-protocol_whitelist','file,pipe','-i',str(paths[0]),
             '-map','0:v:0','-map','0:a:0?', '-vf',
             "scale=w='max(2,trunc(iw*min(1,720/max(iw,ih))/2)*2)':h='max(2,trunc(ih*min(1,720/max(iw,ih))/2)*2)'",
             '-c:v','libx264','-preset','veryfast','-pix_fmt','yuv420p','-profile:v','main',
