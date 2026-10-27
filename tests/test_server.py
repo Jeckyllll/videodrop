@@ -208,6 +208,61 @@ class ServerTests(unittest.TestCase):
         self.s.tg.document.assert_called_once()
         self.assertEqual(self.s.store.job(row['id'])['state'],'done')
 
+    def test_incompatible_original_gets_full_resolution_compatible_copy(self):
+        import imageio_ffmpeg
+        ffmpeg=imageio_ffmpeg.get_ffmpeg_exe()
+        row=self.job(); source=self.file(row)
+        subprocess.run([ffmpeg,'-v','error','-f','lavfi','-i','testsrc=size=64x96:rate=5',
+            '-f','lavfi','-i','sine=frequency=440','-t','1','-c:v','libvpx-vp9',
+            '-c:a','aac','-y',str(source)],check=True)
+        original_hash=hashlib.sha256(source.read_bytes()).hexdigest()
+        self.s.store.update(row['id'],mode='file',size=source.stat().st_size,metadata=json.dumps({'kind':'video',
+            'downloadedMedia':{'videoCodec':'vp9','audioCodec':'aac','width':64,'height':96,'duration':1}}))
+        def verify(path,request):
+            decoded=subprocess.run([ffmpeg,'-hide_banner','-i',str(path),'-f','null','-'],capture_output=True,text=True)
+            self.assertEqual(decoded.returncode,0)
+            self.assertIn('Video: h264',decoded.stderr)
+            self.assertIn('Audio: aac',decoded.stderr)
+            self.assertIn('64x96',decoded.stderr)
+            return {'media':{'videoCodec':'h264','pixelFormat':'yuv420p','audioCodec':'aac','width':64,'height':96}}
+        with tempfile.TemporaryDirectory() as bindir:
+            os.symlink(ffmpeg,Path(bindir)/'ffmpeg')
+            with patch.dict(os.environ,{'PATH':bindir+os.pathsep+os.environ.get('PATH','')}), patch('server.service.validate_download',side_effect=verify):
+                updated,paths=self.s.compatible_copy(self.s.store.job(row['id']),[source])
+        self.assertEqual(len(paths),2)
+        self.assertEqual(hashlib.sha256(source.read_bytes()).hexdigest(),original_hash)
+        self.assertEqual(json.loads(updated['metadata'])['compatibleCopy'],paths[1].name)
+        self.assertEqual(self.s.paths(updated),paths)
+
+    def test_compatible_copy_failure_preserves_original(self):
+        row=self.job(mode='file'); source=self.file(row)
+        self.s.store.update(row['id'],metadata=json.dumps({'kind':'video','downloadedMedia':{'videoCodec':'vp9'}}))
+        with patch('server.service.subprocess.Popen',side_effect=OSError('unavailable')):
+            updated,paths=self.s.compatible_copy(self.s.store.job(row['id']),[source])
+        self.assertEqual(paths,[source])
+        self.assertEqual(self.s.paths(updated),[source])
+        self.assertTrue(source.exists())
+
+    def test_large_compatible_copy_and_original_have_separate_links(self):
+        self.s.base='https://files.example.com'
+        row=self.job(mode='file'); original=self.file(row)
+        compatible=original.parent/'VideoDrop-compatible.mp4'; compatible.write_bytes(b'compat')
+        self.s.store.update(row['id'],metadata=json.dumps({'kind':'video','compatibleCopy':compatible.name}),
+            files=json.dumps([original.name,compatible.name]))
+        self.s.tg.limit=5
+        with patch.object(self.s,'preview'), patch.object(self.s,'compatible_copy',side_effect=lambda r,p:(r,p)):
+            self.s.deliver(self.s.store.job(row['id']))
+        done=self.s.store.job(row['id'])
+        self.assertEqual(done['state'],'done')
+        self.assertEqual(self.s.paths(done),[original,compatible])
+        text,buttons=self.s.job_card(done,'result')
+        self.assertEqual([b[0]['text'] for b in buttons],['Скачать оригинал','Скачать совместимый MP4'])
+        client=create_app(self.s).test_client()
+        for i,expected in enumerate((original.read_bytes(),compatible.read_bytes())):
+            with client.get(buttons[i][0]['url'].removeprefix(self.s.base)) as response:
+                self.assertEqual(response.status_code,200)
+                self.assertEqual(response.data,expected)
+
     def test_quality_estimate_uses_probed_duration_when_source_omits_it(self):
         row=self.job()
         def media(current,mode):

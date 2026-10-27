@@ -20,7 +20,7 @@ from zoneinfo import ZoneInfo
 import requests
 from cryptography.fernet import Fernet
 
-from server.media import clean_source
+from server.media import clean_source, validate_download
 from server.store import Store
 from server.youtube import YouTube
 
@@ -224,7 +224,10 @@ class Service:
         if (view=='result' or state=='done') and row['mode']=='link' and row['youtube_id']:
             return title+'\nГотово · доступ по ссылке',[[{'text':'Открыть видео','url':'https://youtu.be/'+row['youtube_id']}]]
         if (view=='result' or state=='done') and row['mode']=='file' and row['expires'] and json.loads(row['files']) and self.base:
-            buttons = [[{'text':f'Скачать файл {i+1}','url':item['url']}] for i,item in enumerate(self.file_links(row))]
+            info = json.loads(row['metadata'])
+            buttons = [[{'text':('Скачать совместимый MP4' if item['name']==info.get('compatibleCopy') else
+                ('Скачать оригинал' if info.get('compatibleCopy') else f'Скачать файл {i+1}')),'url':item['url']}]
+                for i,item in enumerate(self.file_links(row))]
             return title+f"\nСкачать до {local_time(row['expires'])} (Минск)",buttons
         if state=='choice':
             parts=[title]
@@ -641,6 +644,67 @@ class Service:
                     os.killpg(process.pid,signal.SIGKILL); process.wait()
             preview.unlink(missing_ok=True)
 
+    def compatible_copy(self, row, paths):
+        """Create a full-resolution playback copy when the original is less compatible."""
+        info = json.loads(row['metadata'])
+        media = info.get('downloadedMedia', {})
+        if row['entrypoint'] != 'telegram' or info.get('kind') != 'video' or len(paths) != 1 or not media.get('videoCodec'):
+            return row, paths
+        original = paths[0]
+        if (original.suffix.lower() == '.mp4' and media.get('videoCodec') == 'h264'
+                and media.get('pixelFormat') == 'yuv420p' and media.get('audioCodec') in (None, 'aac')):
+            return row, paths
+        compatible = original.parent/'VideoDrop-compatible.mp4'
+        if compatible == original:
+            compatible = original.parent/'VideoDrop-compatible-copy.mp4'
+        args = ['ffmpeg','-nostdin','-v','error','-xerror','-y','-protocol_whitelist','file,pipe',
+            '-i',str(original),'-map','0:v:0','-map','0:a:0?',
+            '-vf','pad=ceil(iw/2)*2:ceil(ih/2)*2',
+            '-c:v','libx264','-preset','veryfast','-crf','18','-pix_fmt','yuv420p','-profile:v','high',
+            '-c:a','aac','-b:a','192k','-movflags','+faststart',str(compatible)]
+        process = None
+        success = False
+        try:
+            process = subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True)
+            deadline = time.monotonic()+7200
+            while process.poll() is None:
+                self.worker_seen = time.time()
+                if self.cancelled(row['id']):
+                    raise ValueError('Отправка отменена.')
+                if (time.monotonic()>deadline or self.disk_used()>self.budget
+                        or self.disk_used(original.parent)>self.per_job or shutil.disk_usage(self.files).free<2*GIB):
+                    raise ValueError('Не удалось подготовить совместимый файл.')
+                self.stop.wait(1)
+            if process.returncode or not compatible.is_file() or not compatible.stat().st_size:
+                raise ValueError('Не удалось подготовить совместимый файл.')
+            check = validate_download(compatible, {'format':'mp4compat'})['media']
+            if (check.get('videoCodec') != 'h264' or check.get('pixelFormat') != 'yuv420p'
+                    or (media.get('audioCodec') and check.get('audioCodec') != 'aac')
+                    or (media.get('width') and check.get('width') not in (media['width'],media['width']+1))
+                    or (media.get('height') and check.get('height') not in (media['height'],media['height']+1))):
+                raise ValueError('Не удалось проверить совместимый файл.')
+            info['compatibleCopy'] = compatible.name
+            directory = (self.files/row['id']).resolve()
+            self.store.update(row['id'],files=json.dumps([str(original.relative_to(directory)),str(compatible.relative_to(directory))]),metadata=json.dumps(info))
+            self.store.event(row['id'],row['user_id'],'compatible_copy_ready')
+            success = True
+            return self.store.job(row['id']), [original, compatible]
+        except (ValueError,OSError):
+            if self.cancelled(row['id']):
+                raise ValueError('Отправка отменена.')
+            self.store.event(row['id'],row['user_id'],'compatible_copy_failed')
+            self.notify(row['user_id'],'Не удалось создать совместимый файл. Отправляю оригинал.')
+            return row, paths
+        finally:
+            if process and process.poll() is None:
+                os.killpg(process.pid,signal.SIGTERM)
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid,signal.SIGKILL); process.wait()
+            if not success:
+                compatible.unlink(missing_ok=True)
+
     def deliver(self, row):
         paths = self.paths(row)
         if row['mode']=='link':
@@ -665,6 +729,7 @@ class Service:
         self.store.update(row['id'],state='delivering')
         self.show_job(row['id'])
         self.preview(row, paths)
+        row, paths = self.compatible_copy(row, paths)
         if any(p.stat().st_size>self.tg.limit for p in paths) or row['entrypoint']=='extension':
             if not self.base:
                 raise ValueError(f'Для файла больше лимита Telegram ({size_text(self.tg.limit)}) или задания из расширения нужна прямая HTTPS-ссылка с сервера. Она пока не подключена. Файл сохранён на 24 часа без сжатия.')
@@ -682,8 +747,14 @@ class Service:
                 continue
             if self.cancelled(row['id']):
                 raise ValueError('Отправка отменена.')
-            label = 'Оригинал · без дополнительного сжатия' if row['format'] in ('mp4','mkv') else 'Файл · выбранный формат'
-            caption = '' if len(paths)>1 or json.loads(row['metadata']).get('kind')=='images' else '\n'.join(filter(None,(label,self.media_note(row))))
+            info = json.loads(row['metadata'])
+            if path.name == info.get('compatibleCopy'):
+                caption = 'Совместимый MP4 · полное разрешение, перекодирован'
+            elif info.get('kind') == 'images':
+                caption = ''
+            else:
+                label = 'Оригинал · без дополнительного сжатия' if row['format'] in ('mp4','mkv') else 'Файл · выбранный формат'
+                caption = '\n'.join(filter(None,(label,self.media_note(row))))
             self.tg.document(row['user_id'],path,caption)
             self.store.update(row['id'],delivery_index=index+1)
             self.store.event(row['id'],row['user_id'],'telegram_file_delivered',path.name)

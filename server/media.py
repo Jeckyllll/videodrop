@@ -89,7 +89,7 @@ def validate_download(path, request):
     """Inspect the actual file, rather than trusting its .mp4 extension or extractor metadata."""
     try:
         result = subprocess.run(['ffprobe','-v','error','-protocol_whitelist','file,pipe',
-            '-show_entries','stream=codec_name,codec_type,width,height,bit_rate:stream_disposition=attached_pic:format=duration',
+            '-show_entries','stream=codec_name,codec_type,width,height,bit_rate,pix_fmt:stream_disposition=attached_pic:format=duration',
             '-of','json',str(path)],capture_output=True,text=True,timeout=30,check=True)
         info = json.loads(result.stdout)
     except (OSError,ValueError,subprocess.SubprocessError):
@@ -108,6 +108,7 @@ def validate_download(path, request):
     except (TypeError,ValueError):
         duration = None
     media = {'videoCodec':video.get('codec_name') if video else None,
+        'pixelFormat':video.get('pix_fmt') if video else None,
         'audioCodec':audio.get('codec_name') if audio else None,
         'duration':duration,
         'width':video.get('width') if video else None,'height':video.get('height') if video else None,
