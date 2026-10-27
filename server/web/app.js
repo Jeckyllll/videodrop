@@ -3,7 +3,7 @@ const $=id=>document.getElementById(id);
 const extensionId=new URLSearchParams(location.hash.slice(1)).get('extension');
 const parentOrigin=window.parent!==window && /^[a-p]{32}$/.test(extensionId||'') ? 'chrome-extension://'+extensionId : null;
 if(parentOrigin)document.body.classList.add('embedded');
-let token='',session=null,current=null,timer=null,historyTimer=null,bridgePending=null,showAudit=false,busy=false,viewSequence=0;
+let token='',session=null,current=null,timer=null,historyTimer=null,bridgePending=null,showAudit=false,busy=false,viewSequence=0,contextReceived=false;
 const labels={queued:'В очереди…',inspecting:'Проверяю ссылку…',choice:'Выберите качество и способ получения',downloading:'Скачиваю на сервер…',uploading:'Загружаю на YouTube…',delivering:'Готовлю результат…',done:'Готово',cancelled:'Отменено',expired:'Срок хранения истёк',error:'Не удалось скачать',review:'Нужна проверка результата'};
 const active=new Set(['queued','inspecting','downloading','uploading','delivering']);
 function status(text=''){$('status').textContent=text;}
@@ -82,7 +82,7 @@ async function history(restore=false){
 }
 async function connect(){
   if(!token){$('login').hidden=false;$('workspace').hidden=true;return;}
-  try{session=await api('session');$('login').hidden=true;$('workspace').hidden=false;$('account').textContent=session.name+ (session.role==='owner'&&session.name!=='Владелец'?' · владелец':'');$('version').textContent='Сервер '+session.version;$('audit').hidden=session.role!=='owner';await history(true);}
+  try{session=await api('session');$('login').hidden=true;$('workspace').hidden=false;$('account').textContent=session.name+ (session.role==='owner'&&session.name!=='Владелец'?' · владелец':'');$('version').textContent='Сервер '+session.version;$('audit').hidden=session.role!=='owner';await history(!parentOrigin);}
   catch(error){status(error.message);if(!token){$('login').hidden=false;$('workspace').hidden=true;}}
 }
 async function lock(action){if(busy)return;busy=true;$('inspect').disabled=$('start').disabled=true;status();try{await action();}catch(error){status(error.message);}finally{busy=false;$('inspect').disabled=$('start').disabled=false;}}
@@ -91,10 +91,20 @@ window.addEventListener('message',event=>{
   if(!parentOrigin||event.origin!==parentOrigin||event.source!==window.parent)return;
   const data=event.data;
   if(data?.type==='context'){
+    contextReceived=true;
     token=typeof data.token==='string'?data.token:'';
     const sources=Array.isArray(data.sources)?data.sources:[];
     $('source').replaceChildren(...sources.map(source=>{const option=el('option',source.label+' · '+new URL(source.url).hostname);option.value=source.url;return option;}));
-    $('source').hidden=$('source-label').hidden=!sources.length;$('url').hidden=$('url-label').hidden=!!sources.length;
+    $('source-list').replaceChildren(...sources.map(source=>{
+      const card=el('div',undefined,'source-item'), info=el('div'), button=el('button','Выбрать');
+      info.append(el('strong',source.label),el('small',new URL(source.url).hostname));
+      button.onclick=()=>{$('source').value=source.url;$('inspect').click();};
+      card.append(info,button);return card;
+    }));
+    $('source-list').hidden=!sources.length;
+    $('source').hidden=true;$('source-label').hidden=true;
+    $('url').hidden=$('url-label').hidden=!!sources.length;
+    $('inspect').hidden=!!sources.length;
     if(data.error)status(data.error);connect();
   }else if(data?.type==='source-result'&&bridgePending?.requestId===data.requestId){
     const pending=bridgePending;bridgePending=null;clearTimeout(pending.timeout);
@@ -103,7 +113,7 @@ window.addEventListener('message',event=>{
 });
 $('pair').onsubmit=event=>{event.preventDefault();lock(async()=>{const data=await api('pair',{code:$('code').value.trim()});saveToken(data.token);$('code').value='';await connect();});};
 $('inspect').onclick=()=>lock(async()=>{
-  const source=parentOrigin&&!$('source').hidden?await sourceFromBrowser($('source').value):{url:$('url').value.trim(),referer:$('url').value.trim(),userAgent:navigator.userAgent};
+  const source=parentOrigin&&!$('source-list').hidden?await sourceFromBrowser($('source').value):{url:$('url').value.trim(),referer:$('url').value.trim(),userAgent:navigator.userAgent};
   const job=await api('jobs',{...source,prepare:true});await loadJob(job.id);
 });
 $('start').onclick=()=>lock(async()=>{if(!current)return;const id=current.id;await api('jobs/'+id+'/start',{format:$('format').value,height:Number($('quality').value||0),mode:$('youtube').checked?'link':'file'});await loadJob(id);});
@@ -112,4 +122,4 @@ $('format').onchange=$('youtube').onchange=formatChanged;
 $('refresh').onclick=()=>location.reload();
 $('logout').onclick=()=>lock(async()=>{await api('logout',{});saveToken('');clearTimeout(timer);viewSequence++;current=null;session=null;$('job').hidden=true;await connect();});
 $('audit').onclick=()=>lock(async()=>{showAudit=!showAudit;$('audit').textContent=showAudit?'Мои задания':'Журнал сотрудников';await history();});
-if(parentOrigin)parentMessage('ready');else{token=localStorage.getItem('videodrop-token')||'';$('source-label').hidden=true;connect();}
+if(parentOrigin){parentMessage('ready');setTimeout(()=>{if(!contextReceived){status('Не удалось подключить расширение. Нажмите «Обновить» вверху окна.');parentMessage('ready');}},5000);}else{token=localStorage.getItem('videodrop-token')||'';$('source-label').hidden=true;connect();}

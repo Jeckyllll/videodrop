@@ -1,1 +1,23 @@
 :root{font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#272735;background:#f7f7fb;color-scheme:light}*{box-sizing:border-box}body{margin:0}main{max-width:720px;margin:0 auto;padding:20px}header,.inline,.account{display:flex;align-items:center;justify-content:space-between;gap:12px}header{margin-bottom:18px}.brand{display:flex;align-items:center;gap:12px;font-size:24px}.brand span{background:#6650df;border-radius:12px;color:white;padding:0 11px;font-size:34px}.account{margin-bottom:16px;color:#707080;font-size:13px}h1,h2,p{margin:0 0 12px}h1{font-size:20px}h2{font-size:16px;overflow-wrap:anywhere}button,.button{border:0;border-radius:10px;background:#6650df;color:white;padding:11px 16px;font:inherit;font-weight:600;cursor:pointer;text-decoration:none;display:inline-block}button:disabled{opacity:.5;cursor:default}a{color:#5b47c9;overflow-wrap:anywhere}.quiet{color:#6650df;background:transparent;padding:5px 0;font-size:13px;white-space:nowrap}.wide{width:100%;margin-top:14px}input,select{border:1px solid #d9d8e6;background:white;border-radius:9px;padding:11px;width:100%;font:inherit;color:inherit;margin:5px 0 12px}label{font-size:13px;display:block}.card{border:1px solid #e2e1ed;background:white;padding:18px;border-radius:16px;margin-bottom:16px}.columns{display:grid;grid-template-columns:1fr 1.5fr;gap:12px}.check{display:flex;gap:10px;align-items:flex-start;font-size:15px;margin:10px 0}.check input{width:18px;margin:4px 0;accent-color:#6650df}.check small{color:#7f7f8e}.muted,footer{color:#777785;font-size:12px;margin-top:10px}.history-row{padding:12px 0;border-bottom:1px solid #e4e4ed;display:flex;justify-content:space-between;align-items:flex-start;gap:12px}.history-row p{margin:2px 0}.history-row button{text-align:left;white-space:normal}.history{margin:20px 0}.history .muted{margin:3px 0}#status:empty{display:none}#status{color:#695392;background:#eeeafa;border-radius:10px;padding:10px;font-size:13px}#result .button{display:block;margin:8px 0}#job-status{color:#717180;font-size:14px}#pair{margin-top:18px}#pair input{margin:0;min-width:0}#source{white-space:nowrap;text-overflow:ellipsis}#code{letter-spacing:1px}.embedded main{padding:14px}.embedded header,.embedded .standalone{display:none}.embedded .account{margin-bottom:10px}.embedded .card{padding:14px}.embedded h1{font-size:18px}[hidden]{display:none!important}@media(max-width:420px){main{padding:12px}.columns{grid-template-columns:1fr}.columns label select{margin-bottom:4px}}
+/* Компактный интерфейс в расширении: основные действия и список найденных видео. */
+.embedded-title{display:none}
+.embedded{background:#f8f8f5;font-size:13px;color:#282832}
+.embedded main{padding:14px 18px}
+.embedded .standalone-title{display:none}
+.embedded .embedded-title{display:block;font-size:14px;color:#737780;font-weight:500;margin:4px 0 13px}
+.embedded .account{font-size:11px;margin-bottom:7px}
+.embedded #source-card{padding:0;border:0;background:transparent;border-radius:0;margin-bottom:12px}
+.embedded #source-card .muted{font-size:11px;margin:9px 0}
+.embedded #source-list:not([hidden])~.muted{display:none}
+.embedded .source-item{background:#fff;border:1px solid #e4e3e9;border-radius:11px;padding:12px;margin-bottom:9px;display:flex;align-items:center;gap:9px}
+.embedded .source-item div{flex:1;min-width:0}
+.embedded .source-item strong,.embedded .source-item small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.embedded .source-item strong{font-size:13px}.embedded .source-item small{font-size:11px;color:#91919a}
+.embedded .source-item button{font-size:12px;padding:8px 12px;border-radius:9px}
+.embedded #job{border-radius:11px;padding:14px;margin-bottom:10px}
+.embedded #job h2{font-size:14px}
+.embedded .columns{grid-template-columns:1fr 1.4fr;gap:8px}
+.embedded select,.embedded input{font-size:12px;padding:9px;margin-bottom:7px}
+.embedded .check{font-size:13px}.embedded .check input{width:17px;margin:2px 0}
+.embedded .history{margin:10px 0}.history summary{cursor:pointer;color:#6450d8;font-size:13px;padding:8px 0}
+.embedded footer{display:none}

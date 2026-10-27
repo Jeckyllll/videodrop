@@ -13,7 +13,8 @@
 <section id="workspace" hidden>
 <div class="account"><span id="account"></span><button id="logout" class="quiet">Выйти</button></div>
 <section class="card" id="source-card">
-<h1>Скачать видео или пост</h1>
+<h1 class="standalone-title">Скачать видео или пост</h1><h1 class="embedded-title">Видео на этой странице</h1>
+<div id="source-list" hidden></div>
 <label for="source" id="source-label">На открытой странице</label><select id="source" hidden></select>
 <label for="url" id="url-label">Ссылка</label><input id="url" type="url" placeholder="Вставьте ссылку на видео или пост" autocomplete="off">
 <button id="inspect" class="wide">Выбрать качество</button>
@@ -28,6 +29,6 @@
 <button id="start" class="wide">Скачать файл</button><p class="muted">Файл будет доступен для скачивания 24 часа.</p>
 </div><div id="result"></div>
 </section>
-<section class="history"><div class="inline"><h2>Мои задания</h2><button id="audit" class="quiet" hidden>Журнал сотрудников</button></div><div id="history"></div></section>
+<details class="history"><summary>История скачиваний</summary><div class="inline"><h2>Мои задания</h2><button id="audit" class="quiet" hidden>Журнал сотрудников</button></div><div id="history"></div></details>
 <footer><span id="version"></span><span class="standalone"> · <a href="/app/VideoDrop-Chrome.zip">Расширение Chrome</a></span></footer>
 </section></main></body></html>
