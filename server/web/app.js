@@ -3,7 +3,7 @@ const $=id=>document.getElementById(id);
 const extensionId=new URLSearchParams(location.hash.slice(1)).get('extension');
 const parentOrigin=window.parent!==window && /^[a-p]{32}$/.test(extensionId||'') ? 'chrome-extension://'+extensionId : null;
 if(parentOrigin)document.body.classList.add('embedded');
-let token='',session=null,current=null,timer=null,historyTimer=null,bridgePending=null,showAudit=false,busy=false,viewSequence=0,contextReceived=false;
+let token='',session=null,current=null,timer=null,historyTimer=null,bridgePending=null,showAudit=false,busy=false,viewSequence=0,contextReceived=false,directAvailable=false,localPending=null;
 const labels={queued:'В очереди…',inspecting:'Проверяю ссылку…',choice:'Выберите качество и способ получения',downloading:'Скачиваю на сервер…',uploading:'Загружаю на YouTube…',delivering:'Готовлю результат…',done:'Готово',cancelled:'Отменено',expired:'Срок хранения истёк',error:'Не удалось скачать',review:'Нужна проверка результата'};
 const active=new Set(['queued','inspecting','downloading','uploading','delivering']);
 function status(text=''){$('status').textContent=text;}
@@ -39,10 +39,10 @@ function formatChanged(){
   $('video-options').hidden=images;
   $('youtube').closest('label').hidden=images;
   const youtubeAllowed=!!session?.youtube&&!audio&&!images;
-  $('youtube').disabled=!youtubeAllowed;if(!youtubeAllowed)$('youtube').checked=false;
+  $('youtube').disabled=!youtubeAllowed;if(parentOrigin)$('youtube').checked=youtubeAllowed;else if(!youtubeAllowed)$('youtube').checked=false;
   $('youtube-note').textContent=images?'Из поста будут скачаны только картинки.':!session?.youtube?'Загрузка на YouTube ещё не подключена.':audio?'Аудио можно получить файлом.':'';
   $('estimate').textContent=$('format').value==='mp4compat' ? 'H.264/AAC: разрешение сохраняется, видео перекодируется. Размер станет известен после скачивания.' : audio ? (current.info?.duration?'Размер звука: ≈ '+size(current.info.duration*192000/8):'Размер звука станет известен после скачивания.') : '≈ — оценка видео вместе со звуком. Точный вес — после скачивания.';
-  $('start').textContent=$('youtube').checked?'Скачать и загрузить на YouTube':images?'Скачать картинки':'Скачать файл';
+  $('start').textContent=$('youtube').checked?'Загрузить на YouTube':images?'Скачать картинки':'Скачать файл';
 }
 function renderJob(row){
   const changed=current?.id!==row.id,wasChoice=current?.state==='choice';current=row;
@@ -87,26 +87,33 @@ async function connect(){
   catch(error){status(error.message);if(!token){$('login').hidden=false;$('workspace').hidden=true;}}
 }
 async function lock(action){if(busy)return;busy=true;$('inspect').disabled=$('start').disabled=true;status();try{await action();}catch(error){status(error.message);}finally{busy=false;$('inspect').disabled=$('start').disabled=false;}}
+function downloadLocal(url){return new Promise((resolve,reject)=>{const requestId=crypto.randomUUID();const timeout=setTimeout(()=>{localPending=null;reject(new Error('Обновите расширение и попробуйте ещё раз.'));},15000);localPending={requestId,resolve,reject,timeout};parentMessage('download-local',{requestId,url});});}
 function sourceFromBrowser(url){return new Promise((resolve,reject)=>{const requestId=crypto.randomUUID();const timeout=setTimeout(()=>{bridgePending=null;reject(new Error('Откройте расширение заново.'));},15000);bridgePending={requestId,resolve,reject,timeout};parentMessage('source',{requestId,url});});}
 window.addEventListener('message',event=>{
   if(!parentOrigin||event.origin!==parentOrigin||event.source!==window.parent)return;
   const data=event.data;
   if(data?.type==='context'){
     contextReceived=true;
+    directAvailable=!!data.features?.directDownload;
     token=typeof data.token==='string'?data.token:'';
     const sources=Array.isArray(data.sources)?data.sources:[];
     $('source').replaceChildren(...sources.map(source=>{const option=el('option',source.label+' · '+new URL(source.url).hostname);option.value=source.url;return option;}));
     $('source-list').replaceChildren(...sources.map(source=>{
-      const card=el('div',undefined,'source-item'), info=el('div'), button=el('button','Выбрать');
+      const card=el('div',undefined,'source-item'), info=el('div'), actions=el('div',undefined,'source-actions');
+      const local=el('button','Скачать на компьютер'), youtube=el('button','На YouTube','secondary-action');
       info.append(el('strong',source.label),el('small',new URL(source.url).hostname));
-      button.onclick=()=>{$('source').value=source.url;$('inspect').click();};
-      card.append(info,button);return card;
+      local.onclick=()=>lock(async()=>{if(!directAvailable)throw new Error('Обновите расширение в Chrome до версии 2.2.0.');await downloadLocal(source.url);status('Загрузка запущена в Chrome.');});
+      youtube.onclick=()=>{if(!session?.youtube){status('Канал YouTube ещё не подключён.');return;} $('source').value=source.url;$('inspect').click();};
+      actions.append(local,youtube);card.append(info,actions);return card;
     }));
     $('source-list').hidden=!sources.length;
     $('source').hidden=true;$('source-label').hidden=true;
     $('url').hidden=$('url-label').hidden=!!sources.length;
     $('inspect').hidden=!!sources.length;
     if(data.error)status(data.error);connect();
+  }else if(data?.type==='download-local-result'&&localPending?.requestId===data.requestId){
+    const pending=localPending;localPending=null;clearTimeout(pending.timeout);
+    if(data.error)pending.reject(new Error(data.error));else pending.resolve();
   }else if(data?.type==='source-result'&&bridgePending?.requestId===data.requestId){
     const pending=bridgePending;bridgePending=null;clearTimeout(pending.timeout);
     if(data.error)pending.reject(new Error(data.error));else pending.resolve(data.source);
@@ -114,10 +121,12 @@ window.addEventListener('message',event=>{
 });
 $('pair').onsubmit=event=>{event.preventDefault();lock(async()=>{const data=await api('pair',{code:$('code').value.trim()});saveToken(data.token);$('code').value='';await connect();});};
 $('inspect').onclick=()=>lock(async()=>{
-  const source=parentOrigin&&!$('source-list').hidden?await sourceFromBrowser($('source').value):{url:$('url').value.trim(),referer:$('url').value.trim(),userAgent:navigator.userAgent};
+  if(parentOrigin&&!session?.youtube)throw new Error('Канал YouTube ещё не подключён.');
+  if(parentOrigin&&$('source-list').hidden)throw new Error('Откройте страницу с видео.');
+  const source=parentOrigin?await sourceFromBrowser($('source').value):{url:$('url').value.trim(),referer:$('url').value.trim(),userAgent:navigator.userAgent};
   const job=await api('jobs',{...source,prepare:true});await loadJob(job.id);
 });
-$('start').onclick=()=>lock(async()=>{if(!current)return;const id=current.id;await api('jobs/'+id+'/start',{format:$('format').value,height:Number($('quality').value||0),mode:$('youtube').checked?'link':'file'});await loadJob(id);});
+$('start').onclick=()=>lock(async()=>{if(!current)return;if(parentOrigin&&!$('youtube').checked)throw new Error('Для загрузки файла на компьютер выберите её на карточке видео.');const id=current.id;await api('jobs/'+id+'/start',{format:$('format').value,height:Number($('quality').value||0),mode:$('youtube').checked?'link':'file'});await loadJob(id);});
 $('cancel').onclick=()=>lock(async()=>{if(current){await api('jobs/'+current.id+'/cancel',{});await loadJob(current.id);}});
 $('format').onchange=$('youtube').onchange=formatChanged;
 $('refresh').onclick=()=>location.reload();

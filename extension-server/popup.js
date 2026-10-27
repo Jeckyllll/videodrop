@@ -2,19 +2,19 @@
 const $=id=>document.getElementById(id),frame=$('app'),base=VideoDropBridge.base;
 let tab=null,sources=[],contextError='',ready=false,frameReady=false;
 const http=url=>{try{const u=new URL(url);return ['https:','http:'].includes(u.protocol);}catch{return false;}};
-const sourcePattern=/\.(mp4|webm|m3u8|mpd)(?:[?#]|$)/i;
+const sourcePattern=/\.(mp4|webm|mov|m3u8|mpd)(?:[?#]|$)/i;
 const playerPattern=/https?:\/\/(?:player\.vimeo\.com\/video\/|(?:www\.)?youtube(?:-nocookie)?\.com\/embed\/|rutube\.ru\/play\/embed\/|(?:kinescope\.io|iframe\.mediadelivery\.net|video\.sibnet\.ru|vkvideo\.ru|vk\.com)\/)/i;
 function status(text){$('status').textContent=text;}
 function send(type,data={}){frame.contentWindow.postMessage({type,...data},base);}
 function scanPage(){
   const result=[];
   for(const node of document.querySelectorAll('video,video source,iframe,embed')){const url=node.currentSrc||node.src;if(url&&/^https?:/.test(url))result.push({url,label:node.tagName==='IFRAME'?'Встроенное видео':'Видеофайл'});}
-  for(const entry of performance.getEntriesByType('resource'))if(/\.(m3u8|mpd)(?:[?#]|$)/i.test(entry.name))result.push({url:entry.name,label:'Поток видео'});
+  for(const entry of performance.getEntriesByType('resource'))if(/\.(m3u8|mpd|mp4|webm|mov)(?:[?#]|$)/i.test(entry.name)&&!/[?&](?:range|bytestart)=/i.test(entry.name))result.push({url:entry.name,label:/\.(m3u8|mpd)(?:[?#]|$)/i.test(entry.name)?'Поток видео':'Видеофайл'});
   return result;
 }
 async function context(){
   const saved=await chrome.storage.local.get('serverToken');
-  if(ready&&frameReady)send('context',{token:saved.serverToken||'',sources,error:contextError});
+  if(ready&&frameReady)send('context',{token:saved.serverToken||'',sources,error:contextError,features:{directDownload:true}});
 }
 async function init(){
   // Do not expose the API token to content scripts or synchronize it through Google.
@@ -43,6 +43,17 @@ window.addEventListener('message',async event=>{
   if(data?.type==='ready'){frameReady=true;if(ready)await context();return;}
   if(data?.type==='save-token'){
     if(typeof data.token==='string'&&/^[A-Za-z0-9_-]{0,128}$/.test(data.token)){if(data.token)await chrome.storage.local.set({serverToken:data.token});else await chrome.storage.local.remove('serverToken');}return;
+  }
+  if(data?.type==='download-local'&&typeof data.requestId==='string'){
+    try{
+      const source=VideoDropBridge.findSource(sources,data.url);
+      if(!source||!tab||!VideoDropBridge.directMedia(source.url))throw new Error('На странице нет прямого файла MP4, WebM или MOV. Для этого источника прямое скачивание пока недоступно.');
+      const current=await chrome.tabs.get(tab.id);
+      if(current.url!==tab.url)throw new Error('Страница изменилась. Откройте расширение заново.');
+      await chrome.downloads.download({url:source.url,saveAs:false});
+      send('download-local-result',{requestId:data.requestId});
+    }catch(error){send('download-local-result',{requestId:data.requestId,error:error.message||'Не удалось запустить загрузку в Chrome.'});}
+    return;
   }
   if(data?.type!=='source'||typeof data.requestId!=='string')return;
   try{

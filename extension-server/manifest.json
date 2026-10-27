@@ -1,14 +1,15 @@
 {
   "manifest_version": 3,
   "name": "VideoDrop — сервер",
-  "version": "2.1.1",
-  "description": "Скачать видео или картинки через сервер VideoDrop. Локальное приложение не требуется.",
+  "version": "2.2.0",
+  "description": "Прямое скачивание файлов в Chrome и загрузка видео на YouTube через сервер.",
   "permissions": [
     "activeTab",
     "scripting",
     "storage",
     "webRequest",
-    "cookies"
+    "cookies",
+    "downloads"
   ],
   "host_permissions": [
     "https://videodrop.13-140-180-98.sslip.io/*",

@@ -2,7 +2,7 @@
 
 ## Текущая версия: сервер + Telegram + Chrome
 
-Новый клиент Chrome находится в **`extension-server/`**. Он работает напрямую с сервером; приложение на Mac не требуется. Установка и подключение описаны в [extension-server/README.md](extension-server/README.md), сервер — в [server/README.md](server/README.md).
+Новый клиент Chrome находится в **`extension-server/`**. Он скачивает обнаруженные прямые видеофайлы через Chrome, а для отправки на YouTube использует сервер; приложение на Mac не требуется. Установка и подключение описаны в [extension-server/README.md](extension-server/README.md), сервер — в [server/README.md](server/README.md).
 
 Собрать архив расширения: `.venv/bin/python scripts/build_server_extension.py`. Сервер раздаёт его по `/app/VideoDrop-Chrome.zip`.
 
