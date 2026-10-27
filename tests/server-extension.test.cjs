@@ -27,3 +27,21 @@ test('new package has no local host, debugger, Studio, shared secret or remote s
   }
   assert.match(manifest.content_security_policy.extension_pages,/script-src 'self'/);
 });
+test('site access defaults on, respects opt-out, and sends only cookies for the selected page',async()=>{
+  const vm=require('node:vm');
+  for(const preference of [undefined,false]){
+    const listeners={},sent=[],saved=[];
+    const fields=Object.fromEntries(['app','access','capture','status','expand','refresh'].map(id=>[id,{checked:false,disabled:false,hidden:false,textContent:'',contentWindow:{postMessage:value=>sent.push(value)}}]));
+    const chrome={runtime:{id:'a'.repeat(32)},storage:{local:{setAccessLevel:async()=>{},get:async key=>key==='accessEnabled'?{accessEnabled:preference}:{},set:async obj=>saved.push(obj)},session:{get:async()=>({})}},
+      tabs:{query:async()=>[{id:1,url:'https://edu.example/lesson'}],get:async()=>({url:'https://edu.example/lesson'})},
+      scripting:{executeScript:async()=>[]},cookies:{getAllCookieStores:async()=>[{id:'1',tabIds:[1]}],getAll:async()=>[{domain:'edu.example',hostOnly:true,name:'session',path:'/',value:'s'},{domain:'other.example',hostOnly:true,name:'other',path:'/',value:'x'}]}};
+    const context={document:{getElementById:id=>fields[id],body:{classList:{add(){}}}},window:{addEventListener:(type,fn)=>listeners[type]=fn},location:{search:''},navigator:{userAgent:'test'},chrome,URL,URLSearchParams,VideoDropBridge:bridge};
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension-server/popup.js'),'utf8'),context);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(fields.access.checked,preference!==false);
+    await listeners.message({origin:bridge.base,source:fields.app.contentWindow,data:{type:'source',requestId:'1',url:'https://edu.example/lesson'}});
+    const result=sent.find(message=>message.type==='source-result');
+    assert.equal(result.source.cookies.length,preference===false?0:1);
+    if(preference!==false) assert.equal(result.source.cookies[0].domain,'edu.example');
+  }
+});

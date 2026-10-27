@@ -18,6 +18,8 @@ async function context(){
 async function init(){
   // Do not expose the API token to content scripts or synchronize it through Google.
   await chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
+  const preference=await chrome.storage.local.get('accessEnabled');
+  $('access').checked=preference.accessEnabled!==false;
   const selected=new URLSearchParams(location.search).get('tab');
   if(selected&&/^\d+$/.test(selected)){tab=await chrome.tabs.get(Number(selected));document.body.classList.add('expanded');$('expand').hidden=true;}
   else [tab]=await chrome.tabs.query({active:true,currentWindow:true});
@@ -33,13 +35,7 @@ async function init(){
   }else{contextError='Откройте страницу с видео или вставьте ссылку.';$('access').disabled=$('capture').disabled=true;}
   ready=true;if(frame.contentWindow)await context();
 }
-$('access').onchange=async()=>{
-  if(!$('access').checked)return;
-  try{
-    const origins=[...new Set([tab.url,...sources.map(source=>source.url)].map(url=>new URL(url).origin+'/*'))];
-    if(!await chrome.permissions.request({permissions:['cookies'],origins})){$('access').checked=false;status('Доступ не предоставлен.');}else status('Доступ будет передан только при выборе видео.');
-  }catch{$('access').checked=false;status('Не удалось получить разрешение.');}
-};
+$('access').onchange=async()=>{await chrome.storage.local.set({accessEnabled:$('access').checked});};
 window.addEventListener('message',async event=>{
   if(!VideoDropBridge.accepts(event,frame))return;
   const data=event.data;
@@ -66,7 +62,7 @@ $('refresh').onclick=()=>{frame.src=base+'/app/?refresh='+Date.now()+'#extension
 $('expand').onclick=()=>{chrome.windows.create({url:chrome.runtime.getURL('popup.html')+(tab?'?tab='+tab.id:''),type:'popup',width:540,height:800});window.close();};
 $('capture').onclick=async()=>{
   try{
-    if(!tab||!await chrome.permissions.request({origins:['https://*/*','http://*/*']}))return;
+    if(!tab)return;
     const state=(await chrome.storage.session.get(String(tab.id)))[String(tab.id)];
     if(state?.armed&&state.page===tab.url){sources=[];await init();status('Список обновлён.');return;}
     await chrome.storage.session.set({[String(tab.id)]:{armed:true,started:Date.now(),page:tab.url,media:[]}});
