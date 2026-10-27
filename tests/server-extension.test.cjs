@@ -45,3 +45,25 @@ test('site access defaults on, respects opt-out, and sends only cookies for the 
     if(preference!==false) assert.equal(result.source.cookies[0].domain,'edu.example');
   }
 });
+test('context waits for the server frame regardless of which side becomes ready first',async()=>{
+  const vm=require('node:vm');
+  for(const frameFirst of [false,true]){
+    const listeners={},sent=[];
+    let finishInit;
+    const initGate=new Promise(resolve=>{finishInit=resolve;});
+    const fields=Object.fromEntries(['app','access','capture','status','expand','refresh'].map(id=>[id,{checked:false,contentWindow:{postMessage:(value,target)=>sent.push({value,target})}}]));
+    const chrome={runtime:{id:'a'.repeat(32)},storage:{local:{setAccessLevel:()=>initGate,get:async()=>({}),set:async()=>{}},session:{get:async()=>({})}},tabs:{query:async()=>[{id:1,url:'https://edu.example/lesson'}]},scripting:{executeScript:async()=>[]}};
+    const context={document:{getElementById:id=>fields[id],body:{classList:{add(){}}}},window:{addEventListener:(type,fn)=>listeners[type]=fn},location:{search:''},navigator:{userAgent:'test'},chrome,URL,URLSearchParams,VideoDropBridge:bridge};
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension-server/popup.js'),'utf8'),context);
+    const ready=()=>listeners.message({origin:bridge.base,source:fields.app.contentWindow,data:{type:'ready'}});
+    if(frameFirst){await ready();assert.equal(sent.length,0);finishInit();await new Promise(resolve=>setImmediate(resolve));}
+    else{finishInit();await new Promise(resolve=>setImmediate(resolve));assert.equal(sent.length,0);await ready();}
+    assert.equal(sent.length,1);
+    assert.equal(sent[0].value.type,'context');
+    assert.equal(sent[0].target,bridge.base);
+    fields.refresh.onclick();
+    assert.equal(sent.length,1);
+    await ready();
+    assert.equal(sent.length,2);
+  }
+});

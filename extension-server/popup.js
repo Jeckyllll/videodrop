@@ -1,6 +1,6 @@
 'use strict';
 const $=id=>document.getElementById(id),frame=$('app'),base=VideoDropBridge.base;
-let tab=null,sources=[],contextError='',ready=false;
+let tab=null,sources=[],contextError='',ready=false,frameReady=false;
 const http=url=>{try{const u=new URL(url);return ['https:','http:'].includes(u.protocol);}catch{return false;}};
 const sourcePattern=/\.(mp4|webm|m3u8|mpd)(?:[?#]|$)/i;
 const playerPattern=/https?:\/\/(?:player\.vimeo\.com\/video\/|(?:www\.)?youtube(?:-nocookie)?\.com\/embed\/|rutube\.ru\/play\/embed\/|(?:kinescope\.io|iframe\.mediadelivery\.net|video\.sibnet\.ru|vkvideo\.ru|vk\.com)\/)/i;
@@ -13,7 +13,8 @@ function scanPage(){
   return result;
 }
 async function context(){
-  const saved=await chrome.storage.local.get('serverToken');send('context',{token:saved.serverToken||'',sources,error:contextError});
+  const saved=await chrome.storage.local.get('serverToken');
+  if(ready&&frameReady)send('context',{token:saved.serverToken||'',sources,error:contextError});
 }
 async function init(){
   // Do not expose the API token to content scripts or synchronize it through Google.
@@ -33,13 +34,13 @@ async function init(){
     sources.push({url:tab.url,label:sources.length?'Ссылка на страницу':'Видео или пост'});
     sources=[...new Map(sources.map(source=>[source.url,source])).values()].slice(0,60);
   }else{contextError='Откройте страницу с видео или вставьте ссылку.';$('access').disabled=$('capture').disabled=true;}
-  ready=true;if(frame.contentWindow)await context();
+  ready=true;if(frameReady)await context();
 }
 $('access').onchange=async()=>{await chrome.storage.local.set({accessEnabled:$('access').checked});};
 window.addEventListener('message',async event=>{
   if(!VideoDropBridge.accepts(event,frame))return;
   const data=event.data;
-  if(data?.type==='ready'){if(ready)await context();return;}
+  if(data?.type==='ready'){frameReady=true;if(ready)await context();return;}
   if(data?.type==='save-token'){
     if(typeof data.token==='string'&&/^[A-Za-z0-9_-]{0,128}$/.test(data.token)){if(data.token)await chrome.storage.local.set({serverToken:data.token});else await chrome.storage.local.remove('serverToken');}return;
   }
@@ -58,7 +59,7 @@ window.addEventListener('message',async event=>{
     send('source-result',{requestId:data.requestId,source:{url:source.url,referer:tab.url,userAgent:navigator.userAgent,cookies}});
   }catch(error){send('source-result',{requestId:data.requestId,error:error.message||'Не удалось прочитать доступ к странице.'});}
 });
-$('refresh').onclick=()=>{frame.src=base+'/app/?refresh='+Date.now()+'#extension='+chrome.runtime.id;status('');};
+$('refresh').onclick=()=>{frameReady=false;frame.src=base+'/app/?refresh='+Date.now()+'#extension='+chrome.runtime.id;status('');};
 $('expand').onclick=()=>{chrome.windows.create({url:chrome.runtime.getURL('popup.html')+(tab?'?tab='+tab.id:''),type:'popup',width:540,height:800});window.close();};
 $('capture').onclick=async()=>{
   try{
@@ -70,4 +71,4 @@ $('capture').onclick=async()=>{
   }catch{status('Не удалось включить поиск.');}
 };
 frame.src=base+'/app/#extension='+chrome.runtime.id;
-init().catch(()=>{ready=true;contextError='Не удалось прочитать страницу. Вставьте ссылку вручную.';context();});
+init().catch(()=>{ready=true;contextError='Не удалось прочитать страницу. Вставьте ссылку вручную.';if(frameReady)context();});
