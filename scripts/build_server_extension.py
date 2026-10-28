@@ -5,7 +5,9 @@ import json
 import zipfile
 
 ROOT=Path(__file__).resolve().parents[1]
-FILES=('manifest.json','popup.html','popup.css','popup.js','bridge.js','background.js','README.md')
+FILES=('manifest.json','popup.html','popup.css','popup.js','bridge.js','background.js','README.md',
+       'stream-local.html','stream-local.css','stream-local.mjs','stream-core.mjs',
+       'vendor/mediabunny.min.mjs','vendor/MEDIABUNNY-LICENSE')
 
 
 def build(root=ROOT,output=None):

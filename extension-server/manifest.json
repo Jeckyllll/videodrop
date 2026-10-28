@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "VideoDrop — сервер",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "Прямое скачивание файлов в Chrome и загрузка видео на YouTube через сервер.",
   "permissions": [
     "activeTab",
@@ -24,7 +24,7 @@
     "default_title": "Скачать через VideoDrop"
   },
   "content_security_policy": {
-    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; frame-src https://videodrop.13-140-180-98.sslip.io; connect-src https://videodrop.13-140-180-98.sslip.io"
+    "extension_pages": "default-src 'self'; script-src 'self'; object-src 'none'; style-src 'self'; frame-src https://videodrop.13-140-180-98.sslip.io; connect-src http: https:"
   },
   "minimum_chrome_version": "120"
 }

@@ -67,21 +67,44 @@ test('context waits for the server frame regardless of which side becomes ready 
     assert.equal(sent.length,2);
   }
 });
-test('direct download is limited to discovered complete-file URLs in the current tab',async()=>{
-  const vm=require('node:vm'),listeners={},sent=[],downloads=[];
+test('local downloads only use sources discovered in the current tab',async()=>{
+  const vm=require('node:vm'),listeners={},sent=[],downloads=[],opened=[],stored=[];
   const fields=Object.fromEntries(['app','access','capture','status','expand','refresh'].map(id=>[id,{checked:false,contentWindow:{postMessage:value=>sent.push(value)}}]));
   let tabUrl='https://edu.example/lesson';
-  const chrome={runtime:{id:'a'.repeat(32)},storage:{local:{setAccessLevel:async()=>{},get:async()=>({}),set:async()=>{}},session:{get:async()=>({})}},
-    tabs:{query:async()=>[{id:1,url:tabUrl}],get:async()=>({url:tabUrl})},scripting:{executeScript:async()=>[{result:[{url:'https://cdn.example/video.mp4',label:'Видеофайл'},{url:'https://cdn.example/live.m3u8',label:'Поток видео'}]}]},
+  const chrome={runtime:{id:'a'.repeat(32),getURL:name=>'chrome-extension://test/'+name},storage:{local:{setAccessLevel:async()=>{},get:async()=>({}),set:async()=>{}},session:{get:async()=>({}),set:async item=>stored.push(item),remove:async()=>{}}},
+    tabs:{query:async()=>[{id:1,url:tabUrl}],get:async()=>({url:tabUrl}),create:async item=>opened.push(item)},scripting:{executeScript:async()=>[{result:[{url:'https://cdn.example/video.mp4',label:'Видеофайл'},{url:'https://cdn.example/live.m3u8',label:'Поток видео'}]}]},
     downloads:{download:async options=>{downloads.push(options);return 42;}}};
-  const context={document:{getElementById:id=>fields[id],body:{classList:{add(){}}}},window:{addEventListener:(type,fn)=>listeners[type]=fn},location:{search:''},navigator:{userAgent:'test'},chrome,URL,URLSearchParams,VideoDropBridge:bridge};
+  const context={document:{getElementById:id=>fields[id],body:{classList:{add(){}}}},window:{addEventListener:(type,fn)=>listeners[type]=fn},location:{search:''},navigator:{userAgent:'test'},chrome,URL,URLSearchParams,VideoDropBridge:bridge,crypto:{randomUUID:()=> '11111111-1111-4111-8111-111111111111'}};
   vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension-server/popup.js'),'utf8'),context);
   await new Promise(resolve=>setImmediate(resolve));
   async function request(url,origin=bridge.base){await listeners.message({origin,source:fields.app.contentWindow,data:{type:'download-local',requestId:url,url}});return sent.at(-1);}
   await request('https://cdn.example/video.mp4');assert.equal(downloads.length,1);assert.equal(downloads[0].url,'https://cdn.example/video.mp4');assert.equal(sent.at(-1).error,undefined);
-  await request('https://cdn.example/live.m3u8');assert.ok(sent.at(-1).error);assert.equal(downloads.length,1);
+  await request('https://cdn.example/live.m3u8');assert.equal(sent.at(-1).error,undefined);assert.equal(downloads.length,1);
+  assert.equal(opened.length,1);assert.match(opened[0].url,/stream-local\.html#id=/);
+  assert.equal(Object.values(stored[0])[0].url,'https://cdn.example/live.m3u8');
+  assert.doesNotMatch(opened[0].url,/cdn\.example/);
   await request('https://unknown.example/movie.mp4');assert.ok(sent.at(-1).error);assert.equal(downloads.length,1);
   tabUrl='https://other.example/';await request('https://cdn.example/video.mp4');assert.ok(sent.at(-1).error);assert.equal(downloads.length,1);
   assert.equal(bridge.directMedia('https://cdn.example/video.mp4?range=0-1'),false);
   assert.equal(bridge.directMedia('javascript:alert(1)'),false);
+});
+test('update button distinguishes unpacked extensions from managed updates',async()=>{
+  const vm=require('node:vm');
+  for(const [installType,result,expected] of [
+    ['development',null,/автоматически не обновляется/],
+    ['admin','update_available',/обновление.*найдено/i],
+    ['admin','no_update',/новых обновлений.*нет/i],
+  ]){
+    const fields=Object.fromEntries(['app','access','capture','status','expand','refresh'].map(id=>[id,{checked:false,contentWindow:{postMessage(){}}}]));
+    let checks=0;
+    const chrome={runtime:{id:'a'.repeat(32),requestUpdateCheck:async()=>{checks++;return {status:result};}},
+      management:{getSelf:async()=>({installType})},storage:{local:{setAccessLevel:async()=>{},get:async()=>({}),set:async()=>{}},session:{get:async()=>({})}},
+      tabs:{query:async()=>[{id:1,url:'https://example.com/'}]},scripting:{executeScript:async()=>[]}};
+    const context={document:{getElementById:id=>fields[id],body:{classList:{add(){}}}},window:{addEventListener(){}},location:{search:''},navigator:{userAgent:'test'},chrome,URL,URLSearchParams,VideoDropBridge:bridge};
+    vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension-server/popup.js'),'utf8'),context);
+    await new Promise(resolve=>setImmediate(resolve));
+    await fields.refresh.onclick();
+    assert.match(fields.status.textContent,expected);
+    assert.equal(checks,installType==='development'?0:1);
+  }
 });

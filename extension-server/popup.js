@@ -47,10 +47,15 @@ window.addEventListener('message',async event=>{
   if(data?.type==='download-local'&&typeof data.requestId==='string'){
     try{
       const source=VideoDropBridge.findSource(sources,data.url);
-      if(!source||!tab||!VideoDropBridge.directMedia(source.url))throw new Error('На странице нет прямого файла MP4, WebM или MOV. Для этого источника прямое скачивание пока недоступно.');
+      if(!source||!tab||(!VideoDropBridge.directMedia(source.url)&&!VideoDropBridge.hlsMedia(source.url)))throw new Error('На странице нет доступного файла или HLS-потока. Для этого источника прямое скачивание пока недоступно.');
       const current=await chrome.tabs.get(tab.id);
       if(current.url!==tab.url)throw new Error('Страница изменилась. Откройте расширение заново.');
-      await chrome.downloads.download({url:source.url,saveAs:false});
+      if(VideoDropBridge.hlsMedia(source.url)){
+        const id=crypto.randomUUID(),key='local-stream:'+id;
+        await chrome.storage.session.set({[key]:{url:source.url,title:tab.title||'Видео',created:Date.now()}});
+        try{await chrome.tabs.create({url:chrome.runtime.getURL('stream-local.html')+'#id='+id});}
+        catch(error){await chrome.storage.session.remove(key);throw error;}
+      }else await chrome.downloads.download({url:source.url,saveAs:false});
       send('download-local-result',{requestId:data.requestId});
     }catch(error){send('download-local-result',{requestId:data.requestId,error:error.message||'Не удалось запустить загрузку в Chrome.'});}
     return;
@@ -70,7 +75,20 @@ window.addEventListener('message',async event=>{
     send('source-result',{requestId:data.requestId,source:{url:source.url,referer:tab.url,userAgent:navigator.userAgent,cookies}});
   }catch(error){send('source-result',{requestId:data.requestId,error:error.message||'Не удалось прочитать доступ к странице.'});}
 });
-$('refresh').onclick=()=>{frameReady=false;frame.src=base+'/app/?refresh='+Date.now()+'#extension='+chrome.runtime.id;status('');};
+$('refresh').onclick=async()=>{
+  frameReady=false;frame.src=base+'/app/?refresh='+Date.now()+'#extension='+chrome.runtime.id;
+  status('Окно обновлено. Проверяем расширение…');
+  try{
+    const installed=await chrome.management.getSelf();
+    if(installed.installType==='development'){
+      status('Окно обновлено. Распакованное расширение автоматически не обновляется.');return;
+    }
+    const result=await chrome.runtime.requestUpdateCheck();
+    if(result.status==='update_available')status('Обновление расширения найдено. Закройте вкладки VideoDrop для установки.');
+    else if(result.status==='no_update')status('Окно обновлено. Новых обновлений расширения нет.');
+    else status('Окно обновлено. Проверку расширения можно повторить позже.');
+  }catch{status('Окно обновлено. Проверить обновление расширения не удалось.');}
+};
 $('expand').onclick=()=>{chrome.windows.create({url:chrome.runtime.getURL('popup.html')+(tab?'?tab='+tab.id:''),type:'popup',width:540,height:800});window.close();};
 $('capture').onclick=async()=>{
   try{
