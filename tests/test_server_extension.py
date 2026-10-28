@@ -125,6 +125,19 @@ class ExtensionTests(unittest.TestCase):
         paths=next(line.split()[1:] for line in client_block.splitlines() if line.strip().startswith('path '))
         self.assertIn('/api/local-history',paths)
 
+    def test_oauth_callback_requires_one_time_owner_state(self):
+        proxy=(Path(__file__).resolve().parents[1]/'server/Caddyfile').read_text()
+        oauth_block=proxy.split('@oauth {',1)[1].split('}',1)[0]
+        self.assertIn('path /oauth/callback',oauth_block)
+        self.assertIn('method GET',oauth_block)
+        client=create_app(self.s).test_client()
+        self.assertEqual(client.get('/oauth/callback?state=invalid&code=test').status_code,403)
+        employee=self.s.store.issue(2,'oauth',60)
+        self.assertEqual(client.get('/oauth/callback',query_string={'state':employee,'error':'access_denied'}).status_code,403)
+        owner=self.s.store.issue(1,'oauth',60)
+        self.assertEqual(client.get('/oauth/callback',query_string={'state':owner,'error':'access_denied'}).status_code,400)
+        self.assertEqual(client.get('/oauth/callback',query_string={'state':owner,'error':'access_denied'}).status_code,403)
+
     def test_only_named_managed_update_artifacts_are_served(self):
         web=Path(self.tmp.name)/'public';web.mkdir()
         (web/'extension-update.xml').write_text('<gupdate/>')
