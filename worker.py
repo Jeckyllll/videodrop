@@ -143,7 +143,8 @@ def metadata(info, ydl=None):
     heights = sorted({int(f["height"]) for f in video if f.get("height")}, reverse=True)
     return {"title": info.get("title") or "Видео", "duration": info.get("duration"),
             "heights": heights, "hasVideo": bool(video),
-            "hasAudio": any(f.get("acodec") != "none" for f in formats),
+            # A missing codec is unknown, not proof that a source has audio.
+            "hasAudio": any(f.get("acodec") not in (None, "none") for f in formats),
             "extractor": info.get("extractor_key", "Видео"), "formatCount": len(formats),
             "qualitySizes": quality_sizes(info, formats, heights, ydl) if ydl else {}}
 

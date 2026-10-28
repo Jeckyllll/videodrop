@@ -37,6 +37,12 @@ class CompatibleError(ValueError):
     pass
 
 
+def require_source_audio(info, container, media):
+    if (info.get('kind')=='video' and info.get('hasAudio') is True
+            and container in ('mp4','mp4compat','mkv') and not media.get('audioCodec')):
+        raise ValueError('В исходнике есть звук, но скачать его не удалось. Попробуйте другое качество.')
+
+
 def size_text(size):
     return f'{size/GIB:.2f} ГБ' if size >= GIB else f'{size/MIB:.1f} МБ'
 
@@ -796,6 +802,7 @@ class Service:
                 size = sum(p.stat().st_size for p in paths)
                 if size>self.per_job:
                     raise ValueError('Файл превышает лимит размера одного задания.')
+                require_source_audio(info,row['format'],result.get('media') or {})
                 if result.get('media'):
                     info['downloadedMedia'] = result['media']
                     if result['media'].get('duration'):
@@ -811,6 +818,7 @@ class Service:
                 self.store.update(jid,files=json.dumps([str(p.relative_to(directory)) for p in paths]),size=size,metadata=json.dumps(info))
                 self.store.event(jid,row['user_id'],'download_ready',str(size))
                 row = self.store.job(jid)
+            require_source_audio(info,row['format'],info.get('downloadedMedia') or {})
             if row['mode']=='auto' and info.get('kind')!='images':
                 # Telegram can deliver small files immediately without re-encoding.
                 # Larger videos must wait for an explicit delivery choice.

@@ -19,6 +19,13 @@ from server.store import Store
 
 
 class CompatibleVideoTests(unittest.TestCase):
+    def test_unknown_audio_codec_is_not_reported_as_present(self):
+        from worker import metadata
+        no_audio={'formats':[{'vcodec':'h264','acodec':'none','height':720},
+                             {'vcodec':'h264','height':360}]}
+        self.assertFalse(metadata(no_audio)['hasAudio'])
+        self.assertTrue(metadata({'formats':no_audio['formats']+[{'vcodec':'none','acodec':'aac'}]})['hasAudio'])
+
     def test_telegram_preview_uses_streamable_video_endpoint(self):
         with tempfile.TemporaryDirectory() as tmp:
             path=Path(tmp)/'preview.mp4'; path.write_bytes(b'video')
@@ -169,6 +176,37 @@ class ServerTests(unittest.TestCase):
         self.assertEqual(json.loads(done['metadata'])['downloadedMedia']['videoCodec'],'vp9')
         self.assertEqual(done['files'],'[]')
         self.assertEqual(self.s.store.one("SELECT COUNT(*) n FROM events WHERE job_id=? AND kind='media_verified'",(row['id'],))['n'],1)
+
+    def test_source_with_audio_is_not_delivered_if_sound_is_missing(self):
+        row=self.job()
+        def media(current,mode):
+            if mode=='inspect':
+                return {'kind':'video','title':'Test','heights':[720],'hasAudio':True}
+            directory=self.s.files/current['id'];directory.mkdir()
+            path=directory/'video.mp4';path.write_bytes(b'video without audio')
+            return {'path':str(path),'media':{'videoCodec':'h264','audioCodec':None}}
+        self.s.media=Mock(side_effect=media)
+        self.s.run_job(row)
+        failed=self.s.store.job(row['id'])
+        self.assertEqual(failed['state'],'error')
+        self.assertIn('звук',failed['error'])
+        self.s.tg.video.assert_not_called()
+        self.s.tg.document.assert_not_called()
+        self.assertFalse((self.s.files/row['id']).exists())
+
+    def test_intentionally_silent_video_remains_downloadable(self):
+        row=self.job()
+        def media(current,mode):
+            if mode=='inspect':
+                return {'kind':'video','title':'Silent clip','heights':[720],'hasAudio':False}
+            directory=self.s.files/current['id'];directory.mkdir()
+            path=directory/'video.mp4';path.write_bytes(b'silent video')
+            return {'path':str(path),'media':{'videoCodec':'h264','pixelFormat':'yuv420p','audioCodec':None}}
+        self.s.media=Mock(side_effect=media)
+        with patch.object(self.s,'preview'):
+            self.s.run_job(row)
+        self.assertEqual(self.s.store.job(row['id'])['state'],'done')
+        self.s.tg.document.assert_called_once()
 
     def test_video_preview_is_playable_and_original_is_unchanged(self):
         import imageio_ffmpeg
