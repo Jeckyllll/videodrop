@@ -66,3 +66,43 @@ test('media redirects are restricted to HTTPS Google video hosts',async()=>{
   });
   assert.deepEqual(new Uint8Array(await (await allowed(url,{headers:{Range:'bytes=0-'}})).arrayBuffer()),new Uint8Array([1,2,3]));
 });
+test('opaque browser redirects are recovered only for this extension and approved CDN',async()=>{
+  let listener,removed=0,count=0;
+  globalThis.chrome={runtime:{getURL:path=>'chrome-extension://myextension/'+path},webRequest:{onHeadersReceived:{
+    addListener(fn){listener=fn;},removeListener(fn){assert.equal(listener,fn);listener=null;removed++;}}}};
+  try{
+    const fetch=youtubeMediaFetch(url,async(target,options)=>{
+      count++;
+      if(count===1){
+        listener({initiator:'https://other.example',url:target,method:'GET',statusCode:302,responseHeaders:[{name:'Location',value:'https://evil.example/'}]});
+        assert.ok(listener);
+        listener({initiator:'chrome-extension://myextension',url:target,method:'GET',statusCode:302,responseHeaders:[{name:'Location',value:'https://r2.googlevideo.com/file'}]});
+        return {type:'opaqueredirect',status:0,headers:new Headers(),body:null};
+      }
+      assert.equal(new URL(target).hostname,'r2.googlevideo.com');assert.equal(options.credentials,'omit');
+      return new Response(new Uint8Array([4,5,6]),{status:206,headers:{'Content-Range':'bytes 0-2/3'}});
+    });
+    assert.deepEqual(new Uint8Array(await (await fetch(url,{headers:{Range:'bytes=0-'}})).arrayBuffer()),new Uint8Array([4,5,6]));
+    assert.equal(listener,null);assert.equal(removed,2);
+    const blocked=youtubeMediaFetch(url,async(target)=>{
+      listener({initiator:'chrome-extension://myextension',url:target,method:'GET',statusCode:302,responseHeaders:[{name:'Location',value:'https://evil.example/collect'}]});
+      return {type:'opaqueredirect',status:0,headers:new Headers(),body:null};
+    });
+    await assert.rejects(()=>blocked(url,{headers:{Range:'bytes=0-'}}),/перенаправил/);
+    assert.equal(listener,null);
+  }finally{delete globalThis.chrome;}
+});
+test('redirect observer stays active while a slow fetch is in progress',async()=>{
+  let listener,first=true;
+  globalThis.chrome={runtime:{getURL:path=>'chrome-extension://myextension/'+path},webRequest:{onHeadersReceived:{
+    addListener(fn){listener=fn;},removeListener(){listener=null;}}}};
+  try{
+    const fetch=youtubeMediaFetch(url,async target=>{
+      if(first){first=false;await new Promise(resolve=>setTimeout(resolve,1600));
+        assert.ok(listener);listener({initiator:'chrome-extension://myextension',url:target,method:'GET',statusCode:302,responseHeaders:[{name:'Location',value:'https://r2.googlevideo.com/file'}]});
+        return {type:'opaqueredirect',status:0,headers:new Headers(),body:null};}
+      return new Response(new Uint8Array([7]),{status:206,headers:{'Content-Range':'bytes 0-0/1'}});
+    });
+    assert.deepEqual(new Uint8Array(await (await fetch(url,{headers:{Range:'bytes=0-'}})).arrayBuffer()),new Uint8Array([7]));
+  }finally{delete globalThis.chrome;}
+});

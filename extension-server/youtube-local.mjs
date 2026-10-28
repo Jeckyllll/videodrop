@@ -38,6 +38,27 @@ export async function inspectYoutube(id,visitor,fetchImpl=fetch){
   if(!options.length)throw new Error('YouTube не предоставил совместимое качество.');
   return {input:{dispose(){}},options};
 }
+// Fetch intentionally hides manual redirects. Observe only this extension's own
+// pending request; never capture or persist ordinary browsing traffic.
+export function observeYoutubeRedirect(url,chromeApi=globalThis.chrome){
+  const event=chromeApi?.webRequest?.onHeadersReceived;
+  if(!event||!chromeApi?.runtime?.getURL)return null;
+  const initiator=chromeApi.runtime.getURL('').replace(/\/$/,'');
+  let done=false,timer,resolve;
+  const promise=new Promise(r=>{resolve=r;});
+  const finish=value=>{
+    if(done)return;done=true;clearTimeout(timer);event.removeListener(listener);resolve(value);
+  };
+  const listener=details=>{
+    if(details.initiator!==initiator||details.url!==url||details.method!=='GET'||
+        details.statusCode<300||details.statusCode>=400)return;
+    const location=(details.responseHeaders||[]).find(h=>h.name.toLowerCase()==='location')?.value;
+    try{const next=new URL(location,url);finish(validMediaURL(next.href)?next.href:null);}
+    catch{finish(null);}
+  };
+  event.addListener(listener,{urls:['https://*.googlevideo.com/*']},['responseHeaders']);
+  return {wait:()=>{if(!done)timer=setTimeout(()=>finish(null),1500);return promise;},cancel:()=>finish(null)};
+}
 // Googlevideo may stall on unbounded range requests. Read in bounded chunks while
 // presenting one continuous 206 response to the demuxer.
 export function youtubeMediaFetch(root,fetchImpl=fetch,taskSignal){
@@ -56,9 +77,13 @@ export function youtubeMediaFetch(root,fetchImpl=fetch,taskSignal){
       const chunkSignal=signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000);
       let target=String(value),response;
       for(let redirects=0;redirects<=3;redirects++){
-        response=await fetchImpl(target,{...options,headers:partHeaders,credentials:'omit',redirect:'manual',signal:chunkSignal});
-        if(![301,302,303,307,308].includes(response.status))break;
-        const location=response.headers.get('location');
+        const observer=observeYoutubeRedirect(target);
+        try{response=await fetchImpl(target,{...options,headers:partHeaders,credentials:'omit',redirect:'manual',signal:chunkSignal});}
+        catch(error){observer?.cancel();throw error;}
+        const opaque=response.type==='opaqueredirect';
+        if(!opaque&&![301,302,303,307,308].includes(response.status)){observer?.cancel();break;}
+        const location=opaque?await observer?.wait():response.headers.get('location');
+        observer?.cancel();
         if(!location||redirects===3)throw new Error('Источник видео перенаправил запрос.');
         const next=new URL(location,target);
         if(!validMediaURL(next.href))throw new Error('Источник видео изменился.');
