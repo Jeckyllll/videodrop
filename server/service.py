@@ -33,6 +33,9 @@ LABELS = {'queued':'В очереди','inspecting':'Проверяем ссыл
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
           'done':'Готово','error':'Ошибка','review':'Нужна проверка','cancelled':'Отменено','expired':'Файл удалён по сроку'}
 
+class CompatibleError(ValueError):
+    pass
+
 
 def size_text(size):
     return f'{size/GIB:.2f} ГБ' if size >= GIB else f'{size/MIB:.1f} МБ'
@@ -225,8 +228,7 @@ class Service:
             return title+'\nГотово · доступ по ссылке',[[{'text':'Открыть видео','url':'https://youtu.be/'+row['youtube_id']}]]
         if (view=='result' or state=='done') and row['mode']=='file' and row['expires'] and json.loads(row['files']) and self.base:
             info = json.loads(row['metadata'])
-            buttons = [[{'text':('Скачать совместимый MP4' if item['name']==info.get('compatibleCopy') else
-                ('Скачать оригинал' if info.get('compatibleCopy') else f'Скачать файл {i+1}')),'url':item['url']}]
+            buttons = [[{'text':('Скачать видео' if info.get('kind')=='video' else f'Скачать файл {i+1}'),'url':item['url']}]
                 for i,item in enumerate(self.file_links(row))]
             return title+f"\nСкачать до {local_time(row['expires'])} (Минск)",buttons
         if state=='choice':
@@ -600,12 +602,15 @@ class Service:
             return
         if self.store.one("SELECT 1 FROM events WHERE job_id=? AND kind='telegram_preview_delivered'",(row['id'],)):
             return
-        preview = paths[0].parent/'.telegram-preview.mp4'
+        stem = paths[0].stem.encode('utf-8')[:220].decode('utf-8','ignore').rstrip(' .') or 'Видео'
+        preview = paths[0].parent/(stem+' - просмотр.mp4')
+        if preview == paths[0]:
+            preview = paths[0].parent/('VideoDrop-просмотр-'+row['id']+'.mp4')
         # Reserve space for audio and container overhead when targeting the Bot API limit.
         duration = media.get('duration') or 0
         target = int(self.tg.limit * 8 * .85 / duration - 96000) if duration else 1800000
         if target < 80000:
-            self.notify(row['user_id'],'Видео слишком длинное для версии просмотра в Telegram. Отправляю оригинал.')
+            self.notify(row['user_id'],'Видео слишком длинное для просмотра в Telegram. Подготавливаю файл.')
             return
         bitrate = min(target, 900000)
         args = ['ffmpeg','-nostdin','-v','error','-y','-protocol_whitelist','file,pipe','-i',str(paths[0]),
@@ -628,13 +633,13 @@ class Service:
                 self.stop.wait(1)
             if process.returncode or not preview.is_file() or preview.stat().st_size > self.tg.limit:
                 raise ValueError('Не удалось подготовить видео для просмотра.')
-            self.tg.video(row['user_id'],preview,'Для просмотра')
+            self.tg.video(row['user_id'],preview)
             self.store.event(row['id'],row['user_id'],'telegram_preview_delivered')
         except (ValueError,OSError):
             if self.cancelled(row['id']):
                 raise ValueError('Отправка отменена.')
             self.store.event(row['id'],row['user_id'],'telegram_preview_failed')
-            self.notify(row['user_id'],'Не удалось подготовить видео для просмотра. Отправляю оригинал.')
+            self.notify(row['user_id'],'Не удалось подготовить видео для просмотра. Подготавливаю файл.')
         finally:
             if process and process.poll() is None:
                 os.killpg(process.pid,signal.SIGTERM)
@@ -654,9 +659,12 @@ class Service:
         if (original.suffix.lower() == '.mp4' and media.get('videoCodec') == 'h264'
                 and media.get('pixelFormat') == 'yuv420p' and media.get('audioCodec') in (None, 'aac')):
             return row, paths
-        compatible = original.parent/'VideoDrop-compatible.mp4'
+        # Keep the title and source identifier while leaving room for the suffix
+        # within common filesystem filename limits.
+        stem = original.stem.encode('utf-8')[:220].decode('utf-8','ignore').rstrip(' .') or 'Видео'
+        compatible = original.parent/(stem+' - MP4.mp4')
         if compatible == original:
-            compatible = original.parent/'VideoDrop-compatible-copy.mp4'
+            compatible = original.parent/(stem+' - совместимый.mp4')
         args = ['ffmpeg','-nostdin','-v','error','-xerror','-y','-protocol_whitelist','file,pipe',
             '-i',str(original),'-map','0:v:0','-map','0:a:0?',
             '-vf','pad=ceil(iw/2)*2:ceil(ih/2)*2',
@@ -685,16 +693,15 @@ class Service:
                 raise ValueError('Не удалось проверить совместимый файл.')
             info['compatibleCopy'] = compatible.name
             directory = (self.files/row['id']).resolve()
-            self.store.update(row['id'],files=json.dumps([str(original.relative_to(directory)),str(compatible.relative_to(directory))]),metadata=json.dumps(info))
+            self.store.update(row['id'],files=json.dumps([str(compatible.relative_to(directory))]),size=compatible.stat().st_size,metadata=json.dumps(info))
             self.store.event(row['id'],row['user_id'],'compatible_copy_ready')
             success = True
-            return self.store.job(row['id']), [original, compatible]
+            return self.store.job(row['id']), [compatible]
         except (ValueError,OSError):
             if self.cancelled(row['id']):
                 raise ValueError('Отправка отменена.')
             self.store.event(row['id'],row['user_id'],'compatible_copy_failed')
-            self.notify(row['user_id'],'Не удалось создать совместимый файл. Отправляю оригинал.')
-            return row, paths
+            raise CompatibleError('Не удалось создать совместимый файл. Попробуйте позже.') from None
         finally:
             if process and process.poll() is None:
                 os.killpg(process.pid,signal.SIGTERM)
@@ -748,9 +755,7 @@ class Service:
             if self.cancelled(row['id']):
                 raise ValueError('Отправка отменена.')
             info = json.loads(row['metadata'])
-            if path.name == info.get('compatibleCopy'):
-                caption = 'Совместимый MP4 · полное разрешение, перекодирован'
-            elif info.get('kind') == 'images':
+            if info.get('kind') in ('images','video'):
                 caption = ''
             else:
                 label = 'Оригинал · без дополнительного сжатия' if row['format'] in ('mp4','mkv') else 'Файл · выбранный формат'
@@ -826,7 +831,7 @@ class Service:
                 self.store.event(jid,row['user_id'],'internal_error',json.dumps({'type':type(e).__name__,'frames':frames}))
             # Never include raw network exception strings (URLs can contain credentials).
             error = str(e)[:700] if isinstance(e,(ValueError,PermissionError)) else 'Не удалось завершить задание. Файл, если готов, сохранён на 24 часа.'
-            state = 'cancelled' if row['cancelled'] else ('review' if row['state'] in ('uploading','delivering') else 'error')
+            state = 'cancelled' if row['cancelled'] else ('error' if isinstance(e,CompatibleError) else ('review' if row['state'] in ('uploading','delivering') else 'error'))
             self.store.update(jid,state=state,error=error,source=None,expires=time.time()+86400)
             if state=='cancelled' or not json.loads(row['files']):
                 self.remove_files(row)
