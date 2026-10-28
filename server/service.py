@@ -249,6 +249,11 @@ class Service:
                 parts.append('Больше лимита Telegram. Выберите качество ниже; ссылки на большие файлы ещё не настроены.')
             return '\n'.join(parts),self.choice_buttons(row)
         if state in ('error','review'):
+            if state=='review' and row['mode']=='link':
+                buttons = []
+                if json.loads(row['files']) and row['expires'] and row['expires']>time.time() and (self.base or row['size']<=self.tg.limit):
+                    buttons = [[{'text':'Получить сохранённый файл','callback_data':'savedfile:'+row['id']}]]
+                return title+'\nНе удалось подтвердить загрузку на YouTube. Проверьте канал; файл сохранён на 24 часа.',buttons
             message = 'Не удалось подтвердить отправку. Проверьте результат в чате.' if state=='review' else self.user_error(row['error'])
             return title+'\n'+message,[]
         status = {'queued':'Обрабатываю…','inspecting':'Проверяю ссылку…','downloading':'Скачиваю…',
@@ -430,6 +435,19 @@ class Service:
                 return 'Эта кнопка устарела. Используйте последнюю карточку видео.'
             if not row['telegram_message_id']:
                 self.store.update(jid,telegram_message_id=message_id)
+        if action == 'savedfile':
+            with self.store.transaction():
+                row = self.store.job(jid,uid)
+                if row['state']!='review' or row['mode']!='link' or not json.loads(row['files']):
+                    return 'Файл уже выбран или недоступен.'
+                if not row['expires'] or row['expires']<=time.time():
+                    return 'Срок хранения истёк. Пришлите ссылку заново.'
+                if not self.base and row['size']>self.tg.limit:
+                    return 'Файл больше лимита Telegram. Ссылка для скачивания пока недоступна.'
+                self.paths(row)
+                self.store.update(jid,mode='file',state='queued',expires=None,delivery_index=0,error='')
+                self.store.event(jid,uid,'selected','saved_file')
+            return self.show_job(jid)
         if action == 'quality' and row['entrypoint']=='telegram' and row['mode']=='auto' and row['state'] in ('queued','inspecting','downloading'):
             self.store.setting('choose_quality_'+jid, '1')
             return 'Покажу выбор качества после скачивания.'

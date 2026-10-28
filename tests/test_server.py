@@ -453,6 +453,32 @@ class ServerTests(unittest.TestCase):
         self.assertTrue(p.exists())
         self.assertEqual(self.s.store.job(row['id'])['state'],'review')
 
+    def test_failed_youtube_upload_can_deliver_saved_file_without_reupload(self):
+        row=self.job(uid=1,mode='link'); p=self.file(row)
+        self.s.youtube=Mock()
+        self.s.youtube.upload.side_effect=ValueError('YouTube не подтвердил результат.')
+        self.s.run_job(self.s.store.job(row['id']))
+        text,buttons=self.last_card()
+        self.assertIn('Проверьте канал',text)
+        self.assertEqual(buttons[0][0]['callback_data'],'savedfile:'+row['id'])
+        self.s.handle_callback(1,'savedfile:'+row['id'])
+        self.s.handle_callback(1,'savedfile:'+row['id'])
+        self.assertEqual(self.s.store.job(row['id'])['state'],'queued')
+        self.s.run_job(self.s.store.job(row['id']))
+        self.assertEqual(self.s.store.job(row['id'])['state'],'done')
+        self.s.youtube.upload.assert_called_once()
+        self.s.tg.document.assert_called_once()
+        self.assertFalse(p.exists())
+
+    def test_saved_youtube_file_rejects_other_users_and_expired_job(self):
+        row=self.job(uid=2,mode='link'); p=self.file(row)
+        self.s.store.update(row['id'],state='review',expires=time.time()+60)
+        with self.assertRaises(PermissionError): self.s.handle_callback(3,'savedfile:'+row['id'])
+        self.s.store.update(row['id'],expires=time.time()-1)
+        self.assertIn('истёк',self.s.handle_callback(2,'savedfile:'+row['id']))
+        self.assertEqual(self.s.store.job(row['id'])['state'],'review')
+        self.assertTrue(p.exists())
+
     def test_employee_link_means_youtube_even_when_server_file_links_exist(self):
         row=self.job(mode='link'); p=self.file(row)
         self.s.base='https://example.com'
