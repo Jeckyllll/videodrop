@@ -2,6 +2,7 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import struct
 import subprocess
 import sys
@@ -10,6 +11,7 @@ import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -72,7 +74,8 @@ class ManagedReleaseTests(unittest.TestCase):
                 self.assertEqual(app.get('appid'), appid)
                 update = app.find('u:updatecheck', ns)
                 self.assertEqual(update.get('version'), manifest['version'])
-                self.assertEqual(update.get('codebase'), 'https://video.example/app/VideoDrop.crx')
+                self.assertEqual(crx.name,'VideoDrop-'+manifest['version']+'.crx')
+                self.assertEqual(update.get('codebase'), 'https://video.example/app/'+crx.name)
 
     def test_rejects_missing_or_exposed_key_and_non_https(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -83,6 +86,27 @@ class ManagedReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError): stage(key, root / 'out', 'http://video.example/app')
             with self.assertRaises(ValueError): stage(root / 'missing', root / 'out', 'https://video.example/app')
             with self.assertRaises(ValueError): stage(key, root, 'https://video.example/app')
+
+    def test_two_versions_keep_one_identity_and_distinct_package_urls(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);key=root/'private.pem'
+            subprocess.run(['openssl','genpkey','-algorithm','RSA','-pkeyopt','rsa_keygen_bits:2048',
+                            '-out',str(key)],check=True,capture_output=True)
+            key.chmod(0o600)
+            project=root/'project';shutil.copytree(ROOT/'extension-server',project/'extension-server')
+            manifest_file=project/'extension-server/manifest.json'
+            manifest=json.loads(manifest_file.read_text()); results=[]
+            tool=ROOT/'scripts/node_modules/crx3/bin/crx3.js'
+            for version in ('2.4.0','2.4.1'):
+                manifest['version']=version;manifest_file.write_text(json.dumps(manifest))
+                with patch('build_managed_extension.ROOT',project):
+                    crx,xml=stage(key,root/('release-'+version),'https://video.example/app',crx_tool=tool)
+                ns={'u':'http://www.google.com/update2/response'}
+                app=ET.parse(xml).find('.//u:app',ns); update=app.find('u:updatecheck',ns)
+                self.assertEqual(crx.name,'VideoDrop-'+version+'.crx')
+                self.assertEqual(update.get('codebase'),'https://video.example/app/'+crx.name)
+                results.append(app.get('appid'))
+            self.assertEqual(results[0],results[1])
 
 
 if __name__ == '__main__': unittest.main()

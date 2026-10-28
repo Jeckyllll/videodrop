@@ -14,11 +14,11 @@ from server.media import clean_source, public_url
 from server.service import Service, VERSION
 
 
-def create_app(service):
+def create_app(service, web_directory=None):
     app = Flask(__name__)
     app.config['MAX_CONTENT_LENGTH'] = 256*1024
     limits, lock = {}, threading.Lock()
-    web = Path(__file__).with_name('web')
+    web = Path(web_directory) if web_directory is not None else Path(__file__).with_name('web')
 
     def body_json():
         body = request.get_json(silent=True)
@@ -98,9 +98,11 @@ def create_app(service):
 
     @app.get('/app/<path:name>')
     def browser_asset(name):
-        if name not in ('app.js', 'app.css', 'VideoDrop-Chrome.zip'):
+        crx=re.fullmatch(r'VideoDrop-[0-9]{1,5}(?:\.[0-9]{1,5}){0,3}\.crx',name)
+        if name not in ('app.js', 'app.css', 'VideoDrop-Chrome.zip', 'extension-update.xml') and not crx:
             return '', 404
-        return send_from_directory(web, name, as_attachment=name.endswith('.zip'))
+        mime='application/x-chrome-extension' if crx else ('application/xml' if name=='extension-update.xml' else None)
+        return send_from_directory(web, name, as_attachment=name.endswith('.zip'),mimetype=mime)
 
     @app.get('/api/session')
     @auth()

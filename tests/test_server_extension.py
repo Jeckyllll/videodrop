@@ -125,6 +125,27 @@ class ExtensionTests(unittest.TestCase):
         paths=next(line.split()[1:] for line in client_block.splitlines() if line.strip().startswith('path '))
         self.assertIn('/api/local-history',paths)
 
+    def test_only_named_managed_update_artifacts_are_served(self):
+        web=Path(self.tmp.name)/'public';web.mkdir()
+        (web/'extension-update.xml').write_text('<gupdate/>')
+        (web/'VideoDrop-2.4.0.crx').write_bytes(b'old signed package')
+        (web/'VideoDrop-2.4.1.crx').write_bytes(b'new signed package')
+        (web/'secret.pem').write_bytes(b'private key')
+        client=create_app(self.s,web_directory=web).test_client()
+        manifest=client.get('/app/extension-update.xml')
+        self.assertEqual(manifest.status_code,200)
+        self.assertEqual(manifest.mimetype,'application/xml')
+        manifest.close()
+        for version,content in [('2.4.0',b'old signed package'),('2.4.1',b'new signed package')]:
+            result=client.get('/app/VideoDrop-'+version+'.crx')
+            self.assertEqual(result.status_code,200)
+            self.assertEqual(result.mimetype,'application/x-chrome-extension')
+            self.assertEqual(result.data,content)
+            self.assertEqual(result.headers['Cache-Control'],'no-store')
+            result.close()
+        for name in ('secret.pem','VideoDrop-private.crx','VideoDrop-2.4.1.crx.bak','../secret.pem'):
+            self.assertEqual(client.get('/app/'+name).status_code,404)
+
     def test_youtube_not_connected_is_rejected_before_download(self):
         row=self.prepare()
         response=self.client.post('/api/jobs/'+row['id']+'/start',headers=self.headers,json={'format':'mp4','height':0,'mode':'link'})
