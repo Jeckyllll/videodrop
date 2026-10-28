@@ -58,7 +58,7 @@ function renderJob(row){
     if(row.size)$('result').append(el('p',size(row.size)+(row.media?.width?' · '+row.media.width+'×'+row.media.height:''),'muted'));
     if(row.expires && row.files?.length)$('result').append(el('p','Доступно до '+new Date(row.expires*1000).toLocaleString('ru-RU'),'muted'));
     if(row.media?.quicktimeWarning)$('result').append(el('p','Если QuickTime показывает только звук, откройте файл в другом плеере.','muted'));
-    if(!row.files?.length&&!row.youtubeUrl)$('result').append(el('p','Результат находится в Telegram или срок хранения файла истёк.','muted'));
+    if(!row.files?.length&&!row.youtubeUrl)$('result').append(el('p',row.localDownload?'Видео сохранено на компьютер.':'Результат находится в Telegram или срок хранения файла истёк.','muted'));
   }
 }
 async function loadJob(id){

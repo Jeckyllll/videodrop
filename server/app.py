@@ -10,7 +10,7 @@ from flask import Flask, jsonify, redirect, request, send_file, send_from_direct
 from pathlib import Path
 from werkzeug.serving import make_server, WSGIRequestHandler
 
-from server.media import clean_source
+from server.media import clean_source, public_url
 from server.service import Service, VERSION
 
 
@@ -143,7 +143,17 @@ def create_app(service):
         return jsonify(id=row['id'],state=row['state'],title=row['title'],size=row['size'],error=service.user_error(row['error']) if row['error'] else '',
             expires=row['expires'],files=files,media=json.loads(row['metadata']).get('downloadedMedia'),
             info=info,format=row['format'],height=row['height'],mode=row['mode'],cancelled=bool(row['cancelled']),
+            localDownload=metadata.get('localDownload') is True,
             youtubeUrl='https://youtu.be/'+row['youtube_id'] if row['state']=='done' and row['youtube_id'] else None)
+
+    @app.post('/api/local-history')
+    @auth()
+    def local_history(uid):
+        body=body_json()
+        # This validates only the page URL; no fetch is made and authentication query fields are discarded.
+        url=public_url(body.get('url'),resolve=False)
+        row=service.store.record_local_download(uid,body.get('eventId'),url,body.get('title',''),body.get('height',0))
+        return jsonify(id=row['id']),200
 
     @app.post('/api/jobs/<jid>/start')
     @auth()

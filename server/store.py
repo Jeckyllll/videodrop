@@ -1,6 +1,7 @@
 """Durable queue. Source credentials are encrypted and excluded from audit views."""
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import threading
@@ -134,6 +135,26 @@ class Store:
                         audit_url(source['url']), mode, container, height, entrypoint))
         self.event(jid, uid, 'requested')
         return self.job(jid, uid)
+
+    def record_local_download(self, uid, event_id, url, title, height):
+        """Record a completed browser download without storing media or site credentials."""
+        self.require(uid)
+        if not isinstance(event_id, str) or not re.fullmatch(r'[a-f0-9]{32}', event_id):
+            raise ValueError('Некорректный идентификатор скачивания.')
+        if not isinstance(title, str) or len(title) > 200 or any(ord(c) < 32 for c in title):
+            raise ValueError('Некорректное название.')
+        if type(height) is not int or not 0 <= height <= 8640:
+            raise ValueError('Некорректное разрешение.')
+        # Client retries use the same ID; different users cannot collide or replace a job.
+        jid = digest(f'local:{uid}:{event_id}')[:24]
+        now = time.time()
+        with self.transaction() as db:
+            db.execute('''INSERT OR IGNORE INTO jobs
+                (id,user_id,created,updated,state,source,url,title,mode,format,height,metadata,entrypoint)
+                VALUES (?,?,?,?,?,NULL,?,?,?,?,?,?,?)''',
+                (jid,uid,now,now,'done',audit_url(url),title,'file','file',height,
+                 json.dumps({'localDownload': True}), 'extension'))
+        return self.job(jid,uid)
 
     def job(self, jid, uid=None):
         row = self.one('SELECT * FROM jobs WHERE id=?', (jid,))

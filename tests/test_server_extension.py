@@ -92,6 +92,29 @@ class ExtensionTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/session',headers=self.headers).status_code,403)
         self.assertEqual(self.client.get('/api/session',headers=other).status_code,200)
 
+    def test_completed_local_download_is_idempotent_and_contains_no_credentials(self):
+        body={'eventId':'a'*32,'url':'https://edu.example/lesson?id=123&token=secret#fragment',
+              'title':'Урок','height':720}
+        self.assertEqual(self.client.post('/api/local-history',json=body).status_code,403)
+        first=self.client.post('/api/local-history',headers=self.headers,json=body)
+        self.assertEqual(first.status_code,200)
+        second=self.client.post('/api/local-history',headers=self.headers,json={**body,'title':'Changed'})
+        self.assertEqual(first.json,second.json)
+        row=self.s.store.job(first.json['id'])
+        self.assertEqual(row['url'],'https://edu.example/lesson?id=123')
+        self.assertEqual(row['title'],'Урок')
+        self.assertEqual(row['state'],'done')
+        self.assertIsNone(row['source'])
+        result=self.client.get('/api/jobs/'+row['id'],headers=self.headers).json
+        self.assertTrue(result['localDownload'])
+        self.assertEqual(result['files'],[])
+        audit=self.client.get('/api/audit',headers={'Authorization':'Bearer '+self.s.store.issue(1,'api',300)}).json
+        self.assertEqual([item['id'] for item in audit['jobs']], [row['id']])
+        self.assertNotIn('secret',json.dumps(audit))
+        for bad in ({**body,'eventId':'bad'}, {**body,'url':'https://user:pass@edu.example/lesson'},
+                    {**body,'height':True}, {**body,'title':'a\nb'}):
+            self.assertEqual(self.client.post('/api/local-history',headers=self.headers,json=bad).status_code,400)
+
     def test_youtube_not_connected_is_rejected_before_download(self):
         row=self.prepare()
         response=self.client.post('/api/jobs/'+row['id']+'/start',headers=self.headers,json={'format':'mp4','height':0,'mode':'link'})

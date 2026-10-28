@@ -1,6 +1,6 @@
 import {inspectStream,saveStream} from './stream-core.mjs';
 const $=id=>document.getElementById(id);
-let input,options=[];
+let input,options=[],eventId='';
 const status=message=>{$('status').textContent=message;};
 function safeName(value){return (value||'Видео').replace(/[\\/:*?"<>|\x00-\x1f]/g,' ').replace(/\s+/g,' ').trim().slice(0,120)||'Видео';}
 function label(option){
@@ -14,6 +14,7 @@ async function init(){
   const key='local-stream:'+id, item=(await chrome.storage.session.get(key))[key];
   await chrome.storage.session.remove(key);
   if(!item||typeof item.url!=='string'||Date.now()-item.created>300000)throw new Error('Срок выбора истёк. Откройте поток заново.');
+  eventId=id.replaceAll('-','');
   $('title').textContent=safeName(item.title);
   const result=await inspectStream(item.url);input=result.input;options=result.options;
   for(let i=0;i<options.length;i++){
@@ -33,6 +34,7 @@ $('save').onclick=async()=>{
     writable=await handle.createWritable();
     await saveStream(input,options[Number($('quality').value)],writable,p=>status(`Скачиваем: ${Math.round(p*100)}%`));
     input.dispose();input=null;status('Готово. Видео сохранено на компьютер.');$('save').hidden=true;
+    try{await chrome.runtime.sendMessage({type:'record-local-download',eventId,height:options[Number($('quality').value)].height||0});}catch{}
   }catch(error){
     if(writable)try{await writable.abort();}catch{}
     if(error?.name==='AbortError')status('Сохранение отменено.');

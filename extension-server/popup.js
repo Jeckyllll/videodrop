@@ -19,6 +19,7 @@ async function context(){
 async function init(){
   // Do not expose the API token to content scripts or synchronize it through Google.
   await chrome.storage.local.setAccessLevel({accessLevel:'TRUSTED_CONTEXTS'});
+  try{await chrome.runtime.sendMessage({type:'retry-local-history'});}catch{}
   const preference=await chrome.storage.local.get('accessEnabled');
   $('access').checked=preference.accessEnabled!==false;
   const selected=new URLSearchParams(location.search).get('tab');
@@ -52,10 +53,15 @@ window.addEventListener('message',async event=>{
       if(current.url!==tab.url)throw new Error('Страница изменилась. Откройте расширение заново.');
       if(VideoDropBridge.hlsMedia(source.url)){
         const id=crypto.randomUUID(),key='local-stream:'+id;
-        await chrome.storage.session.set({[key]:{url:source.url,title:tab.title||'Видео',created:Date.now()}});
+        await chrome.storage.session.set({[key]:{url:source.url,page:tab.url,title:tab.title||'Видео',created:Date.now()}});
+        try{await chrome.runtime.sendMessage({type:'prepare-local-download',eventId:id.replaceAll('-',''),page:tab.url,title:tab.title||'Видео'});}catch{}
         try{await chrome.tabs.create({url:chrome.runtime.getURL('stream-local.html')+'#id='+id});}
         catch(error){await chrome.storage.session.remove(key);throw error;}
-      }else await chrome.downloads.download({url:source.url,saveAs:false});
+      }else{
+        const downloadId=await chrome.downloads.download({url:source.url,saveAs:false});
+        // A failed journal connection must never prevent or repeat a download.
+        try{await chrome.runtime.sendMessage({type:'track-local-download',downloadId,page:tab.url,title:tab.title||'Видео'});}catch{}
+      }
       send('download-local-result',{requestId:data.requestId});
     }catch(error){send('download-local-result',{requestId:data.requestId,error:error.message||'Не удалось запустить загрузку в Chrome.'});}
     return;
