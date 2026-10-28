@@ -437,6 +437,19 @@ class ServerTests(unittest.TestCase):
         self.s.tg.document.assert_not_called()
         self.assertIn('лимита',self.s.store.job(row['id'])['error'])
 
+    def test_large_video_skips_telegram_preview_before_file_link(self):
+        self.s.tg.limit=5
+        self.s.base='https://files.example.com'
+        row=self.job(mode='file'); self.file(row)
+        self.s.store.update(row['id'],metadata=json.dumps({'kind':'video','downloadedMedia':{
+            'videoCodec':'h264','pixelFormat':'yuv420p','audioCodec':'aac'}}))
+        with patch('server.service.subprocess.Popen') as ffmpeg:
+            self.s.run_job(self.s.store.job(row['id']))
+        ffmpeg.assert_not_called()
+        self.s.tg.video.assert_not_called()
+        self.assertEqual(self.s.store.job(row['id'])['state'],'done')
+        self.assertTrue(self.s.store.job(row['id'])['expires'])
+
     def test_owner_youtube_file_deleted_only_after_verified_upload_and_link_delivery(self):
         row=self.job(uid=1,mode='link'); p=self.file(row)
         self.s.youtube=Mock()

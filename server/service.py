@@ -622,7 +622,8 @@ class Service:
         info = json.loads(row['metadata'])
         media = info.get('downloadedMedia',{})
         if (row['entrypoint'] != 'telegram' or info.get('kind') != 'video'
-                or len(paths) != 1 or not media.get('videoCodec')):
+                or len(paths) != 1 or not media.get('videoCodec')
+                or paths[0].stat().st_size > self.tg.limit):
             return
         if self.store.one("SELECT 1 FROM events WHERE job_id=? AND kind='telegram_preview_delivered'",(row['id'],)):
             return
