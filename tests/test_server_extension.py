@@ -115,6 +115,16 @@ class ExtensionTests(unittest.TestCase):
                     {**body,'height':True}, {**body,'title':'a\nb'}):
             self.assertEqual(self.client.post('/api/local-history',headers=self.headers,json=bad).status_code,400)
 
+    def test_extension_history_endpoint_is_exposed_by_the_proxy_configuration(self):
+        root=Path(__file__).resolve().parents[1]
+        source=(root/'extension-server/background.js').read_text()
+        proxy=(root/'server/Caddyfile').read_text()
+        # Guard the actual integration: an API can work locally while Caddy blocks it externally.
+        self.assertIn("journalBase+'/api/local-history'",source)
+        client_block=proxy.split('@client {',1)[1].split('}',1)[0]
+        paths=next(line.split()[1:] for line in client_block.splitlines() if line.strip().startswith('path '))
+        self.assertIn('/api/local-history',paths)
+
     def test_youtube_not_connected_is_rejected_before_download(self):
         row=self.prepare()
         response=self.client.post('/api/jobs/'+row['id']+'/start',headers=self.headers,json={'format':'mp4','height':0,'mode':'link'})

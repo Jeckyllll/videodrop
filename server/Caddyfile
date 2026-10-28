@@ -21,7 +21,7 @@
         reverse_proxy 127.0.0.1:8787
     }
     @client {
-        path /app/* /api/pair /api/session /api/logout /api/jobs /api/jobs/* /api/audit
+        path /app/* /api/pair /api/session /api/logout /api/jobs /api/jobs/* /api/audit /api/local-history
         method GET HEAD POST OPTIONS
     }
     handle @client {
