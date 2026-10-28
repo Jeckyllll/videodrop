@@ -51,6 +51,34 @@ test('large YouTube responses are read in bounded ranges without cookies',async(
   assert.equal(requests.length,2);
   assert.ok(requests.every(r=>r.end-r.start+1<=1048576&&r.credentials==='omit'&&r.redirect==='manual'));
 });
+test('interrupted chunks are retried from the same offset without losing bytes',async()=>{
+  const bytes=new Uint8Array(1500000);for(let i=0;i<bytes.length;i++)bytes[i]=i%251;
+  const calls=[];let failures=0;
+  const wrapped=youtubeMediaFetch(url,async(_target,options)=>{
+    const range=new Headers(options.headers).get('range');calls.push(range);
+    const m=/^bytes=(\d+)-(\d+)$/.exec(range),start=Number(m[1]),end=Math.min(Number(m[2]),bytes.length-1);
+    if(start===1048576&&failures++===0)throw new TypeError('connection lost');
+    if(start===1048576&&failures===2)return new Response(null,{status:503});
+    return new Response(bytes.subarray(start,end+1),{status:206,headers:{'Content-Range':`bytes ${start}-${end}/${bytes.length}`}});
+  });
+  const response=await wrapped(url,{headers:{Range:'bytes=0-'}});
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()),bytes);
+  assert.deepEqual(calls,['bytes=0-1048575','bytes=1048576-2097151','bytes=1048576-2097151','bytes=1048576-2097151']);
+});
+test('invalid content ranges and permanent errors are not retried',async()=>{
+  for(const response of [()=>new Response(null,{status:403}),()=>new Response(new Uint8Array([1]),{status:206,headers:{'Content-Range':'bytes 9-9/10'}})]){
+    let calls=0;
+    const wrapped=youtubeMediaFetch(url,async()=>{calls++;return response();});
+    await assert.rejects(()=>wrapped(url,{headers:{Range:'bytes=0-'}}));
+    assert.equal(calls,1);
+  }
+});
+test('temporary failures stop after three attempts',async()=>{
+  let calls=0;
+  const wrapped=youtubeMediaFetch(url,async()=>{calls++;return new Response(null,{status:503});});
+  await assert.rejects(()=>wrapped(url,{headers:{Range:'bytes=0-'}}),/соединение/);
+  assert.equal(calls,3);
+});
 test('media redirects are restricted to HTTPS Google video hosts',async()=>{
   const fetch=youtubeMediaFetch(url,async()=>new Response(null,{status:302,headers:{Location:'https://evil.example/collect'}}));
   await assert.rejects(()=>fetch(url,{headers:{Range:'bytes=0-'}}),/Источник видео изменился/);

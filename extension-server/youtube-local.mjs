@@ -61,6 +61,9 @@ export function observeYoutubeRedirect(url,chromeApi=globalThis.chrome){
 }
 // Googlevideo may stall on unbounded range requests. Read in bounded chunks while
 // presenting one continuous 206 response to the demuxer.
+class RetryChunkError extends Error {
+  constructor(){super('Не удалось получить часть видео. Проверьте соединение и попробуйте снова.');}
+}
 export function youtubeMediaFetch(root,fetchImpl=fetch,taskSignal){
   const origin=new URL(root).origin,chunkSize=1024*1024;
   return async(request,options={})=>{
@@ -72,14 +75,14 @@ export function youtubeMediaFetch(root,fetchImpl=fetch,taskSignal){
     let position=start,total=null,closed=false;
     const signals=[];if(options.signal)signals.push(options.signal);if(taskSignal)signals.push(taskSignal);
     const signal=signals.length?AbortSignal.any(signals):undefined;
-    async function chunk(){
+    async function chunkAttempt(){
       const partHeaders=new Headers(headers);partHeaders.set('Range',`bytes=${position}-${position+chunkSize-1}`);
       const chunkSignal=signal?AbortSignal.any([signal,AbortSignal.timeout(30000)]):AbortSignal.timeout(30000);
       let target=String(value),response;
       for(let redirects=0;redirects<=3;redirects++){
         const observer=observeYoutubeRedirect(target);
         try{response=await fetchImpl(target,{...options,headers:partHeaders,credentials:'omit',redirect:'manual',signal:chunkSignal});}
-        catch(error){observer?.cancel();throw error;}
+        catch(error){observer?.cancel();if(signal?.aborted)throw error;throw new RetryChunkError();}
         const opaque=response.type==='opaqueredirect';
         if(!opaque&&![301,302,303,307,308].includes(response.status)){observer?.cancel();break;}
         const location=opaque?await observer?.wait():response.headers.get('location');
@@ -90,13 +93,28 @@ export function youtubeMediaFetch(root,fetchImpl=fetch,taskSignal){
         if(response.body)await response.body.cancel();
         target=next.href;
       }
+      if(response.status===429||response.status>=500&&response.status<=599){
+        if(response.body)try{await response.body.cancel();}catch{}
+        throw new RetryChunkError();
+      }
       const range=/^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.headers.get('content-range')||'');
       if(response.status!==206||!range)throw new Error('Источник не поддерживает загрузку по частям.');
       const first=Number(range[1]),last=Number(range[2]),length=Number(range[3]);
       if(first!==position||last<first||last-first+1>chunkSize||length<=last||!Number.isSafeInteger(length)||(total!==null&&total!==length))throw new Error('Источник вернул некорректную часть видео.');
-      const bytes=new Uint8Array(await response.arrayBuffer());
-      if(bytes.length!==last-first+1)throw new Error('Часть видео получена не полностью.');
+      let bytes;
+      try{bytes=new Uint8Array(await response.arrayBuffer());}
+      catch(error){if(signal?.aborted)throw error;throw new RetryChunkError();}
+      if(bytes.length!==last-first+1)throw new RetryChunkError();
       total=length;position=last+1;return bytes;
+    }
+    async function chunk(){
+      for(let attempt=0;;attempt++){
+        try{return await chunkAttempt();}
+        catch(error){
+          if(!(error instanceof RetryChunkError)||signal?.aborted||attempt>=2)throw error;
+          await new Promise(resolve=>setTimeout(resolve,250*(attempt+1)));
+        }
+      }
     }
     const first=await chunk();
     const stream=new ReadableStream({start(controller){controller.enqueue(first);},async pull(controller){

@@ -78,10 +78,12 @@ await saveStream(input,selected,stream); input.dispose();
 import fs from 'node:fs';
 import {saveYoutube} from %s;
 const inputs={video:fs.readFileSync(process.argv[2]),audio:fs.readFileSync(process.argv[3])};
+const failed=new Set();
 globalThis.fetch=async (request,options={})=>{
  const url=new URL(typeof request==='string'?request:request.url);
  if(url.hostname!=='media.googlevideo.com')throw Error('unexpected network origin');
- const data=inputs[url.searchParams.get('track')];if(!data)throw Error('unexpected input');
+ const track=url.searchParams.get('track');const data=inputs[track];if(!data)throw Error('unexpected input');
+ if(!failed.has(track)){failed.add(track);return new Response(null,{status:503});}
  const range=new Headers(options.headers).get('range');
  let start=0,end=data.length-1;
  if(range){const m=/^bytes=(\\d+)-(\\d*)$/.exec(range);if(!m)throw Error('unexpected range');start=Number(m[1]);if(m[2])end=Math.min(Number(m[2]),end);}
@@ -93,6 +95,7 @@ const selected={supported:true,video:{url:'https://media.googlevideo.com/file?tr
 const fd=fs.openSync(process.argv[4],'w');
 const stream=new WritableStream({write(chunk){fs.writeSync(fd,chunk.data,0,chunk.data.length,chunk.position);},close(){fs.closeSync(fd);},abort(){fs.closeSync(fd);}});
 await saveYoutube(null,selected,stream);
+if(failed.size!==2)throw Error('both track retries were not tested');
 ''' % json.dumps((ROOT/'extension-server/youtube-local.mjs').as_uri()))
             run=subprocess.run(['node',str(script),str(video),str(audio),str(result)],capture_output=True,text=True,timeout=60)
             self.assertEqual(run.returncode,0,run.stderr)
