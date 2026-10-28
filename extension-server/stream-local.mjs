@@ -1,6 +1,10 @@
 import {inspectStream,saveStream} from './stream-core.mjs';
+import {inspectYoutube,saveYoutube} from './youtube-local.mjs';
+import {Logging,LogLevel} from './vendor/mediabunny.min.mjs';
+// Provider errors can contain signed media URLs; show only the concise status below.
+Logging.level=LogLevel.Silent;
 const $=id=>document.getElementById(id);
-let input,options=[],eventId='';
+let input,options=[],eventId='',saveMedia=saveStream;
 const status=message=>{$('status').textContent=message;};
 function safeName(value){return (value||'Видео').replace(/[\\/:*?"<>|\x00-\x1f]/g,' ').replace(/\s+/g,' ').trim().slice(0,120)||'Видео';}
 function label(option){
@@ -16,7 +20,8 @@ async function init(){
   if(!item||typeof item.url!=='string'||Date.now()-item.created>300000)throw new Error('Срок выбора истёк. Откройте поток заново.');
   eventId=id.replaceAll('-','');
   $('title').textContent=safeName(item.title);
-  const result=await inspectStream(item.url);input=result.input;options=result.options;
+  if(item.youtube)saveMedia=saveYoutube;
+  const result=item.youtube?await inspectYoutube(item.youtube,item.visitor):await inspectStream(item.url);input=result.input;options=result.options;
   for(let i=0;i<options.length;i++){
     const option=document.createElement('option');option.value=String(i);option.textContent=label(options[i]);option.disabled=!options[i].supported;$('quality').append(option);
   }
@@ -32,7 +37,7 @@ $('save').onclick=async()=>{
     const handle=await window.showSaveFilePicker({suggestedName:safeName($('title').textContent)+'.mp4',types:[{description:'Видео MP4',accept:{'video/mp4':['.mp4']}}]});
     $('save').disabled=true;$('quality').disabled=true;
     writable=await handle.createWritable();
-    await saveStream(input,options[Number($('quality').value)],writable,p=>status(`Скачиваем: ${Math.round(p*100)}%`));
+    await saveMedia(input,options[Number($('quality').value)],writable,p=>status(`Скачиваем: ${Math.round(p*100)}%`));
     input.dispose();input=null;status('Готово. Видео сохранено на компьютер.');$('save').hidden=true;
     try{await chrome.runtime.sendMessage({type:'record-local-download',eventId,height:options[Number($('quality').value)].height||0});}catch{}
   }catch(error){
@@ -43,4 +48,4 @@ $('save').onclick=async()=>{
   }
 };
 window.addEventListener('pagehide',()=>{if(input)input.dispose();});
-init().catch(error=>status(error?.message?.includes('поток')||error?.message?.includes('совместим')?error.message:'Не удалось прочитать поток. Откройте страницу и запустите видео заново.'));
+init().catch(error=>status(error?.message?.includes('поток')||error?.message?.includes('совместим')||error?.message?.includes('YouTube')?error.message:'Не удалось прочитать поток. Откройте страницу и запустите видео заново.'));

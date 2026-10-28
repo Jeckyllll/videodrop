@@ -22,6 +22,7 @@ class LocalStreamTests(unittest.TestCase):
                 names=set(package.namelist())
                 self.assertIn('stream-local.html',names)
                 self.assertIn('stream-core.mjs',names)
+                self.assertIn('youtube-local.mjs',names)
                 self.assertIn('vendor/mediabunny.min.mjs',names)
                 self.assertIn('vendor/MEDIABUNNY-LICENSE',names)
                 self.assertNotIn('server/data/secret.key',names)
@@ -63,6 +64,43 @@ await saveStream(input,selected,stream); input.dispose();
                 self.assertIn('64x48',decoded.stderr)
             finally:
                 server.shutdown(); server.server_close()
+
+    def test_youtube_separate_video_and_audio_are_muxed_to_playable_mp4(self):
+        ffmpeg=imageio_ffmpeg.get_ffmpeg_exe()
+        with tempfile.TemporaryDirectory() as tmp:
+            folder=Path(tmp);video=folder/'video.mp4';audio=folder/'audio.m4a';result=folder/'result.mp4'
+            subprocess.run([ffmpeg,'-v','error','-f','lavfi','-i','testsrc=size=160x120:rate=25','-t','3',
+                '-c:v','libx264','-pix_fmt','yuv420p','-an','-movflags','+faststart',str(video)],check=True)
+            subprocess.run([ffmpeg,'-v','error','-f','lavfi','-i','sine=frequency=440','-t','3',
+                '-c:a','aac','-vn','-movflags','+faststart',str(audio)],check=True)
+            script=folder/'test.mjs'
+            script.write_text('''
+import fs from 'node:fs';
+import {saveYoutube} from %s;
+const inputs={video:fs.readFileSync(process.argv[2]),audio:fs.readFileSync(process.argv[3])};
+globalThis.fetch=async (request,options={})=>{
+ const url=new URL(typeof request==='string'?request:request.url);
+ if(url.hostname!=='media.googlevideo.com')throw Error('unexpected network origin');
+ const data=inputs[url.searchParams.get('track')];if(!data)throw Error('unexpected input');
+ const range=new Headers(options.headers).get('range');
+ let start=0,end=data.length-1;
+ if(range){const m=/^bytes=(\\d+)-(\\d*)$/.exec(range);if(!m)throw Error('unexpected range');start=Number(m[1]);if(m[2])end=Math.min(Number(m[2]),end);}
+ const headers={'Content-Length':String(end-start+1),'Accept-Ranges':'bytes','Content-Type':'video/mp4'};
+ if(range)headers['Content-Range']=`bytes ${start}-${end}/${data.length}`;
+ return new Response(options.method==='HEAD'?null:data.subarray(start,end+1),{status:range?206:200,headers});
+};
+const selected={supported:true,video:{url:'https://media.googlevideo.com/file?track=video',approxDurationMs:'3000'},audio:{url:'https://media.googlevideo.com/file?track=audio',approxDurationMs:'3000'}};
+const fd=fs.openSync(process.argv[4],'w');
+const stream=new WritableStream({write(chunk){fs.writeSync(fd,chunk.data,0,chunk.data.length,chunk.position);},close(){fs.closeSync(fd);},abort(){fs.closeSync(fd);}});
+await saveYoutube(null,selected,stream);
+''' % json.dumps((ROOT/'extension-server/youtube-local.mjs').as_uri()))
+            run=subprocess.run(['node',str(script),str(video),str(audio),str(result)],capture_output=True,text=True,timeout=60)
+            self.assertEqual(run.returncode,0,run.stderr)
+            decoded=subprocess.run([ffmpeg,'-hide_banner','-i',str(result),'-f','null','-'],capture_output=True,text=True)
+            self.assertEqual(decoded.returncode,0,decoded.stderr)
+            self.assertIn('Video: h264',decoded.stderr)
+            self.assertIn('Audio: aac',decoded.stderr)
+            self.assertIn('160x120',decoded.stderr)
 
 
 if __name__ == '__main__':

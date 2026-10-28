@@ -12,6 +12,15 @@ function scanPage(){
   for(const entry of performance.getEntriesByType('resource'))if(/\.(m3u8|mpd|mp4|webm|mov)(?:[?#]|$)/i.test(entry.name)&&!/[?&](?:range|bytestart)=/i.test(entry.name))result.push({url:entry.name,label:/\.(m3u8|mpd)(?:[?#]|$)/i.test(entry.name)?'Поток видео':'Видеофайл'});
   return result;
 }
+function youtubeVisitor(){
+  for(const script of document.querySelectorAll('script')){
+    const text=script.textContent||'';
+    if(text.length>4000000)continue;
+    const value=text.match(/"(?:VISITOR_DATA|visitorData)"\s*:\s*"([a-zA-Z0-9_%=\-]{1,2048})"/)?.[1];
+    if(value)return value;
+  }
+  return '';
+}
 async function context(){
   const saved=await chrome.storage.local.get('serverToken');
   if(ready&&frameReady)send('context',{token:saved.serverToken||'',sources,error:contextError,features:{directDownload:true}});
@@ -48,12 +57,19 @@ window.addEventListener('message',async event=>{
   if(data?.type==='download-local'&&typeof data.requestId==='string'){
     try{
       const source=VideoDropBridge.findSource(sources,data.url);
-      if(!source||!tab||(!VideoDropBridge.directMedia(source.url)&&!VideoDropBridge.hlsMedia(source.url)))throw new Error('На странице нет доступного файла или HLS-потока. Для этого источника прямое скачивание пока недоступно.');
+      const youtube=source&&tab&&source.url===tab.url?VideoDropBridge.youtubeId(source.url):null;
+      if(!source||!tab||(!youtube&&!VideoDropBridge.directMedia(source.url)&&!VideoDropBridge.hlsMedia(source.url)))throw new Error('На странице нет доступного файла или HLS-потока. Для этого источника прямое скачивание пока недоступно.');
       const current=await chrome.tabs.get(tab.id);
       if(current.url!==tab.url)throw new Error('Страница изменилась. Откройте расширение заново.');
-      if(VideoDropBridge.hlsMedia(source.url)){
+      if(youtube||VideoDropBridge.hlsMedia(source.url)){
         const id=crypto.randomUUID(),key='local-stream:'+id;
-        await chrome.storage.session.set({[key]:{url:source.url,page:tab.url,title:tab.title||'Видео',created:Date.now()}});
+        let visitor='';
+        if(youtube){
+          const frames=await chrome.scripting.executeScript({target:{tabId:tab.id},func:youtubeVisitor});visitor=frames[0]?.result||'';
+          if((await chrome.tabs.get(tab.id)).url!==tab.url)throw new Error('Страница изменилась. Откройте расширение заново.');
+        }
+        if(youtube&&!visitor)throw new Error('Не удалось прочитать данные страницы YouTube. Обновите страницу и попробуйте снова.');
+        await chrome.storage.session.set({[key]:{url:source.url,youtube,visitor,page:tab.url,title:tab.title||'Видео',created:Date.now()}});
         try{await chrome.runtime.sendMessage({type:'prepare-local-download',eventId:id.replaceAll('-',''),page:tab.url,title:tab.title||'Видео'});}catch{}
         try{await chrome.tabs.create({url:chrome.runtime.getURL('stream-local.html')+'#id='+id});}
         catch(error){await chrome.storage.session.remove(key);throw error;}

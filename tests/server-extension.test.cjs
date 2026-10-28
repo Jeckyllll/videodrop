@@ -17,6 +17,38 @@ test('remote UI cannot request arbitrary URLs or unrelated cookies',()=>{
   const values=bridge.scopedCookies([cookie('.example'),cookie('edu.example',true),cookie('bank.example',true),cookie('.example.evil.test'),cookie('edu.example',true)],['https://edu.example/lesson']);
   assert.deepEqual(values.map(c=>c.domain),['.example','edu.example']);
 });
+test('YouTube direct download is limited to the selected unchanged YouTube page',async()=>{
+  const vm=require('node:vm'),listeners={},sent=[],stored=[],opened=[];
+  const fields=Object.fromEntries(['app','access','capture','status','expand','refresh'].map(id=>[id,{checked:false,contentWindow:{postMessage:value=>sent.push(value)}}]));
+  const page='https://www.youtube.com/watch?v=nFOtxOEk0XA';let current=page;
+  const chrome={runtime:{id:'a'.repeat(32),getURL:name=>'chrome-extension://test/'+name},
+    storage:{local:{setAccessLevel:async()=>{},get:async()=>({}),set:async()=>{}},session:{get:async()=>({}),set:async item=>stored.push(item),remove:async()=>{}}},
+    tabs:{query:async()=>[{id:1,url:page,title:'YouTube test'}],get:async()=>({url:current}),create:async item=>opened.push(item)},
+    scripting:{executeScript:async({func})=>[{result:func.name==='youtubeVisitor'?'visitor-token':[]}]}};
+  const context={document:{getElementById:id=>fields[id],body:{classList:{add(){}}}},window:{addEventListener:(type,fn)=>listeners[type]=fn},
+    location:{search:''},navigator:{userAgent:'test'},chrome,URL,URLSearchParams,VideoDropBridge:bridge,crypto:{randomUUID:()=> '11111111-1111-4111-8111-111111111111'}};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension-server/popup.js'),'utf8'),context);
+  await new Promise(resolve=>setImmediate(resolve));
+  const request=url=>listeners.message({origin:bridge.base,source:fields.app.contentWindow,data:{type:'download-local',requestId:'req',url}});
+  await request('https://www.youtube.com/watch?v=q9H63HxY3ag');
+  assert.ok(sent.at(-1).error);assert.equal(opened.length,0);
+  await request(page);
+  assert.equal(opened.length,1);
+  const entry=Object.values(stored[0])[0];assert.equal(entry.youtube,'nFOtxOEk0XA');assert.equal(entry.visitor,'visitor-token');
+  assert.ok(opened[0].url.startsWith('chrome-extension://test/stream-local.html#id='));
+  current='https://www.youtube.com/watch?v=q9H63HxY3ag';await request(page);
+  assert.match(sent.at(-1).error,/Страница изменилась/);assert.equal(opened.length,1);
+});
+test('YouTube page visitor identifier can be read without collecting cookies',async()=>{
+  const vm=require('node:vm'),visitor='a'.repeat(548);
+  const fields=Object.fromEntries(['app','access','capture','status','expand','refresh'].map(id=>[id,{checked:false,contentWindow:{postMessage(){}}}]));
+  const chrome={runtime:{id:'a'.repeat(32)},storage:{local:{setAccessLevel:async()=>{},get:async()=>({})}},tabs:{query:async()=>[]}};
+  const document={getElementById:id=>fields[id],querySelectorAll:()=>[{textContent:`ytcfg.set({"VISITOR_DATA":"${visitor}"});`}],body:{classList:{add(){}}}};
+  const context={document,window:{addEventListener(){}},location:{search:''},navigator:{userAgent:'test'},chrome,URL,URLSearchParams,VideoDropBridge:bridge};
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname,'../extension-server/popup.js'),'utf8'),context);
+  assert.equal(context.youtubeVisitor(),visitor);
+  await new Promise(resolve=>setImmediate(resolve));
+});
 test('new package has no local host, debugger, Studio, shared secret or remote script execution',()=>{
   const root=path.join(__dirname,'../extension-server'),manifest=JSON.parse(fs.readFileSync(path.join(root,'manifest.json')));
   assert.equal(manifest.permissions.includes('debugger'),false);
