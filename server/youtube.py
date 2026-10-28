@@ -1,6 +1,7 @@
 """YouTube OAuth and resumable uploads; visibility is always verified."""
 import json
 import os
+import re
 import time
 from pathlib import Path
 
@@ -10,6 +11,49 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 
 SCOPES = ['https://www.googleapis.com/auth/youtube.upload', 'https://www.googleapis.com/auth/youtube.readonly']
+
+
+def upload_session(session, url, path, cancelled, checkpoint):
+    """Continue one upload session, probing after ambiguous failures; never create another video."""
+    size=path.stat().st_size
+    if size<=0: raise ValueError('Файл видео пуст.')
+    position=0;sent_until=0;attempts=0;probe=False
+    with path.open('rb') as media:
+        while True:
+            if cancelled(): raise ValueError('Отправка отменена.')
+            if probe:
+                chunk=b'';headers={'Content-Length':'0','Content-Range':f'bytes */{size}'}
+            else:
+                media.seek(position);chunk=media.read(min(8*1024*1024,size-position))
+                if not chunk: raise ValueError('Не удалось подтвердить завершение загрузки на YouTube.')
+                sent_until=position+len(chunk)
+                headers={'Content-Length':str(len(chunk)),'Content-Range':f'bytes {position}-{sent_until-1}/{size}'}
+            try:
+                reply=session.put(url,data=chunk,headers=headers,timeout=30 if probe else 180,allow_redirects=False)
+            except requests.RequestException:
+                reply=None
+            if reply is None or reply.status_code==429 or 500<=reply.status_code<600:
+                attempts+=1
+                if attempts>3: raise ValueError('YouTube не подтвердил загрузку. Проверьте канал; файл сохранён.')
+                probe=True;time.sleep(min(2**(attempts-1),4));continue
+            if reply.status_code in (200,201):
+                video_id=reply.json().get('id')
+                if not isinstance(video_id,str) or not video_id: raise ValueError('YouTube не подтвердил результат загрузки.')
+                checkpoint('video',video_id);return video_id
+            if reply.status_code!=308:
+                raise ValueError('YouTube не подтвердил загрузку. Проверьте канал; файл сохранён.')
+            value=reply.headers.get('Range')
+            match=re.fullmatch(r'bytes=0-(\d+)',value) if isinstance(value,str) else None
+            if value is not None and not match: raise ValueError('YouTube вернул некорректный статус загрузки.')
+            confirmed=int(match.group(1))+1 if match else 0
+            if confirmed<position or confirmed>sent_until or confirmed>=size:
+                raise ValueError('YouTube не подтвердил статус загрузки. Проверьте канал; файл сохранён.')
+            if confirmed==position:
+                attempts+=1
+                if attempts>3: raise ValueError('Загрузка на YouTube не продвигается. Файл сохранён.')
+                time.sleep(min(2**(attempts-1),4))
+            else: attempts=0
+            position=confirmed;probe=False
 
 
 class YouTube:
@@ -72,6 +116,7 @@ class YouTube:
             video_id = existing_id
         else:
             size = path.stat().st_size
+            if size<=0: raise ValueError('Файл видео пуст.')
             response = session.post('https://www.googleapis.com/upload/youtube/v3/videos',
                 params={'uploadType':'resumable','part':'snippet,status','notifySubscribers':'false'},
                 headers={'X-Upload-Content-Length':str(size),'X-Upload-Content-Type':'application/octet-stream'},
@@ -83,26 +128,7 @@ class YouTube:
                 raise ValueError('YouTube не вернул адрес загрузки.')
             # Save session URL encrypted before any bytes are sent. Never retry a new insert after ambiguity.
             checkpoint('session', self.cipher.encrypt(upload_url.encode()).decode())
-            position, video_id = 0, None
-            with path.open('rb') as media:
-                while position < size:
-                    if cancelled():
-                        raise ValueError('Отправка отменена.')
-                    media.seek(position)
-                    chunk = media.read(8*1024*1024)
-                    reply = session.put(upload_url, data=chunk, headers={
-                        'Content-Length':str(len(chunk)),
-                        'Content-Range':f'bytes {position}-{position+len(chunk)-1}/{size}'}, timeout=180)
-                    if reply.status_code == 308:
-                        position = int(reply.headers.get('Range','bytes=0--1').split('-')[-1])+1
-                    elif reply.status_code in (200,201):
-                        video_id = reply.json()['id']
-                        checkpoint('video', video_id)
-                        break
-                    else:
-                        reply.raise_for_status()
-            if not video_id:
-                raise ValueError('YouTube не подтвердил завершение загрузки. Проверьте канал; автоматический повтор отключён.')
+            video_id=upload_session(session,upload_url,path,cancelled,checkpoint)
         # Keep local file until channel, visibility and processing are all confirmed.
         deadline = time.monotonic()+3600
         while time.monotonic() < deadline:
