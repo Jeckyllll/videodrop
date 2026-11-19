@@ -33,6 +33,26 @@ class InstagramFailureTests(unittest.TestCase):
         source = clean_source({'url':'https://www.instagram.com/reel/Dc-vdCVy40y/?hvrg=share'}, resolve=False)
         self.assertEqual(source['url'], 'https://www.instagram.com/reel/Dc-vdCVy40y/')
 
+    def test_age_restriction_requires_instagram_error_props_for_this_reel(self):
+        from worker import InstagramAgeAwareIE, InstagramIE
+
+        props = {'failure_reason':'MA', 'restricted_age':18, 'page_type':'MEDIA'}
+        html = json.dumps({'resource':{'__dr':'PolarisErrorRoot.react'}, 'props':props})
+        url = 'https://www.instagram.com/p/Dc-vdCVy40y/'
+        extractor = InstagramAgeAwareIE()
+        for body, response_url, blocked in (
+            (html, url, True),
+            (html, 'https://www.instagram.com/p/Unrelated/', False),
+            (json.dumps({'caption':props}), url, False),
+        ):
+            with self.subTest(blocked=blocked, response_url=response_url), patch.object(
+                    InstagramIE, '_download_webpage_handle', return_value=(body, Mock(url=response_url))):
+                if blocked:
+                    with self.assertRaisesRegex(ValueError, r'18\+'):
+                        extractor._download_webpage_handle(url, 'Dc-vdCVy40y')
+                else:
+                    self.assertEqual(extractor._download_webpage_handle(url, 'Dc-vdCVy40y')[0], body)
+
 class CompatibleVideoTests(unittest.TestCase):
     def test_unknown_audio_codec_is_not_reported_as_present(self):
         from worker import metadata

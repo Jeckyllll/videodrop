@@ -13,6 +13,7 @@ import threading
 import imageio_ffmpeg
 import yt_dlp
 from yt_dlp.cookies import YoutubeDLCookieJar
+from yt_dlp.extractor.instagram import InstagramIE
 
 
 _output_lock = threading.Lock()
@@ -98,7 +99,39 @@ def unwrap(info):
     return info
 
 
+class InstagramAgeAwareIE(InstagramIE):
+    """Surface Instagram's explicit age restriction from its error page."""
+
+    _ERROR_PROPS = re.compile(r'"resource"\s*:\s*\{\s*"__dr"\s*:\s*"PolarisErrorRoot\.react"\s*\}\s*,\s*"props"\s*:\s*')
+
+    @classmethod
+    def ie_key(cls):
+        return InstagramIE.ie_key()
+
+    def _download_webpage_handle(self, url_or_request, video_id, *args, **kwargs):
+        html, response = super()._download_webpage_handle(url_or_request, video_id, *args, **kwargs)
+        # Inspect only the error page for the requested post, not a shared
+        # script, a caption, or a page reached after a redirect to another post.
+        if not isinstance(html, str) or not response or not self.suitable(response.url):
+            return html, response
+        if self._match_id(response.url) != video_id:
+            return html, response
+        for match in self._ERROR_PROPS.finditer(html):
+            try:
+                props, _ = json.JSONDecoder().raw_decode(html[match.end():match.end()+2048])
+            except ValueError:
+                continue
+            if not isinstance(props, dict) or props.get('page_type') != 'MEDIA' or props.get('failure_reason') != 'MA':
+                continue
+            age = props.get('restricted_age')
+            if type(age) is int and 13 <= age <= 99:
+                raise ValueError(f'Instagram ограничивает просмотр ролика ({age}+). Откройте ролик в Instagram с аккаунтом, которому доступен просмотр.')
+        return html, response
+
+
 def extract_info(ydl, source):
+    if InstagramIE.suitable(source['url']):
+        ydl.add_info_extractor(InstagramAgeAwareIE())
     try:
         return unwrap(ydl.extract_info(source['url'], download=False))
     except yt_dlp.utils.DownloadError as original:

@@ -27,7 +27,7 @@ from server.youtube import YouTube
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024*1024
 GIB = 1024*MIB
-VERSION = '2.0.0-preview.11'
+VERSION = '2.0.0-preview.12'
 FILE_TTL = 24*60*60
 LABELS = {'queued':'В очереди','inspecting':'Проверяем ссылку','choice':'Ожидает выбора',
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
@@ -257,6 +257,9 @@ class Service:
                     buttons = [[{'text':'Получить сохранённый файл','callback_data':'savedfile:'+row['id']}]]
                 return title+'\nНе удалось подтвердить загрузку на YouTube. Проверьте канал; файл сохранён на 24 часа.',buttons
             message = 'Не удалось подтвердить отправку. Проверьте результат в чате.' if state=='review' else self.user_error(row['error'])
+            reel = instagram_reel(row['url'])
+            if state == 'error' and reel and message.startswith('Instagram ограничивает просмотр ролика'):
+                return title+'\n'+message, [[{'text':'Открыть в Instagram','url':reel}]]
             return title+'\n'+message,[]
         status = {'queued':'Обрабатываю…','inspecting':'Проверяю ссылку…','downloading':'Скачиваю…',
                   'uploading':'Загружаю на YouTube…','delivering':'Отправляю…','done':'Готово · файл в чате',
