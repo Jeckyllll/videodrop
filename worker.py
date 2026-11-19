@@ -257,7 +257,7 @@ def run(request, validate_download=None):
         ydl.cookiejar = cookie_jar(source.get("cookies", []))
         # Reject live streams before the potentially unbounded download starts.
         info = extract_info(ydl, source)
-        metadata(info)
+        inspected = metadata(info, ydl if request.get('include_info') else None)
         ydl.process_ie_result(info, download=True)
     suffix = "mp4" if request["format"] == "mp4compat" else request["format"]
     files = [p for p in directory.iterdir() if p.suffix.lower() == "." + suffix]
@@ -266,6 +266,8 @@ def run(request, validate_download=None):
     if request["format"] == "mp4compat":
         files = [convert_compatible(files[0])]
     result = {"path": str(files[0]), "size": files[0].stat().st_size}
+    if request.get('include_info'):
+        result["info"] = dict(inspected, kind="video")
     if validate_download is not None:
         result.update(validate_download(files[0], request))
     emit("result", **result)

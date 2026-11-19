@@ -10,6 +10,20 @@ import sys
 from pathlib import Path
 from urllib.parse import urlsplit
 
+INSTAGRAM_EMPTY_RESPONSE = (
+    'Instagram не отдал данные ролика серверу. '
+    'Проверьте, открывается ли ролик в Instagram. Если открывается, попробуйте позже.'
+)
+
+
+def instagram_reel(url):
+    parsed = urlsplit(url)
+    if parsed.hostname not in ('instagram.com', 'www.instagram.com'):
+        return None
+    match = re.fullmatch(r'/(?:[\w.]+/)?reels?/([A-Za-z0-9_-]{1,64})/?', parsed.path)
+    if match:
+        return f'https://www.instagram.com/reel/{match[1]}/'
+
 
 def public_url(value, resolve=True):
     if not isinstance(value, str) or len(value) > 16000 or any(ord(c) < 32 for c in value):
@@ -49,6 +63,8 @@ def clean_source(data, resolve=True):
     ua = str(data.get('userAgent',''))[:1000]
     if '\n' in ua or '\r' in ua:
         raise ValueError('Некорректный User-Agent.')
+    if not cookies and (reel := instagram_reel(url)):
+        url = reel
     return {'url':url,'referer':referer,'cookies':cookies,'userAgent':ua}
 
 
@@ -72,6 +88,8 @@ def image_post(url):
 def friendly_error(error):
     import worker
     message = str(error).lower()
+    if 'instagram' in message and 'empty media response' in message:
+        return INSTAGRAM_EMPTY_RESPONSE
     if 'not a bot' in message:
         return 'YouTube запросил подтверждение входа с IP сервера. Этот ролик сейчас не удалось скачать. Подключение канала для загрузки на YouTube не снимает это ограничение скачивания.'
     if 'tiktok' in message and 'unexpected response from webpage request' in message:

@@ -18,6 +18,21 @@ from server.service import Service, Telegram
 from server.store import Store
 
 
+class InstagramFailureTests(unittest.TestCase):
+    def test_empty_response_has_same_actionable_message_in_worker_and_card(self):
+        raw = ("ERROR: [Instagram] Dc-vdCVy40y: Instagram sent an empty media response. "
+               "Check if this post is accessible in your browser without being logged-in. "
+               "Use --cookies-from-browser or --cookies for authentication.")
+        safe = friendly_error(raw)
+        self.assertIn('Instagram не отдал данные', safe)
+        self.assertNotIn('--cookies', safe)
+        self.assertEqual(Service.user_error(raw), safe)
+        self.assertEqual(Service.user_error(safe), safe)
+
+    def test_public_reel_drops_share_tracking(self):
+        source = clean_source({'url':'https://www.instagram.com/reel/Dc-vdCVy40y/?hvrg=share'}, resolve=False)
+        self.assertEqual(source['url'], 'https://www.instagram.com/reel/Dc-vdCVy40y/')
+
 class CompatibleVideoTests(unittest.TestCase):
     def test_unknown_audio_codec_is_not_reported_as_present(self):
         from worker import metadata
@@ -618,6 +633,30 @@ class ServerTests(unittest.TestCase):
         self.assertFalse(p.exists())
         self.assertEqual(self.s.store.history(1)[0]['state'],'expired')
         with self.assertRaises(PermissionError): self.s.store.resolve(token,'file')
+
+    def test_failed_job_keeps_its_error_after_cleanup(self):
+        row = self.job()
+        self.s.store.update(row['id'], state='error', expires=time.time()-1, error='Источник недоступен.')
+        self.s.cleanup()
+        saved = self.s.store.job(row['id'])
+        self.assertEqual(saved['state'], 'error')
+        self.assertIsNone(saved['expires'])
+        self.assertIn('Источник недоступен.', self.s.job_card(saved)[0])
+
+    def test_telegram_reel_uses_one_worker_lookup_and_keeps_quality(self):
+        row = self.s.store.create(1, {'url':'https://www.instagram.com/reel/example/'})
+        def download(current, mode):
+            self.assertEqual(mode, 'download')
+            path = self.file(current, size=self.s.tg.limit+1)
+            return {'path':str(path), 'info':{'title':'Reel', 'kind':'video', 'hasAudio':True,
+                    'heights':[1920, 1280]}, 'media':{'videoCodec':'h264', 'audioCodec':'aac'}}
+        with patch.object(self.s, 'media', side_effect=download) as media:
+            self.s.run_job(row)
+        media.assert_called_once()
+        saved = self.s.store.job(row['id'])
+        self.assertEqual(saved['state'], 'choice')
+        self.assertEqual(saved['title'], 'Reel')
+        self.assertEqual(json.loads(saved['metadata'])['heights'], [1920, 1280])
 
     def test_expired_choice_cannot_reactivate_a_file_before_cleanup(self):
         row=self.job(); p=self.file(row)

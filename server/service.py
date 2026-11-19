@@ -20,14 +20,14 @@ from zoneinfo import ZoneInfo
 import requests
 from cryptography.fernet import Fernet
 
-from server.media import clean_source, validate_download
+from server.media import INSTAGRAM_EMPTY_RESPONSE, clean_source, instagram_reel, validate_download
 from server.store import Store
 from server.youtube import YouTube
 
 ROOT = Path(__file__).resolve().parents[1]
 MIB = 1024*1024
 GIB = 1024*MIB
-VERSION = '2.0.0-preview.9'
+VERSION = '2.0.0-preview.11'
 FILE_TTL = 24*60*60
 LABELS = {'queued':'В очереди','inspecting':'Проверяем ссылку','choice':'Ожидает выбора',
           'downloading':'Скачиваем','uploading':'Загружаем на YouTube','delivering':'Отправляем',
@@ -184,6 +184,8 @@ class Service:
     @staticmethod
     def user_error(error):
         message = str(error).lower()
+        if 'instagram' in message and ('empty media response' in message or 'не отдал данные ролика' in message):
+            return INSTAGRAM_EMPTY_RESPONSE
         if 'youtube' in message and ('ip сервера' in message or 'not a bot' in message):
             return 'YouTube пока не разрешает скачать этот ролик с сервера.'
         if any(s in message for s in ('требует входа','подтверждения доступа','login','sign in')):
@@ -543,6 +545,8 @@ class Service:
         request = {'source':self.store.source(row['id']), 'mode':mode, 'directory':str(directory),
                    'format':row['format'], 'height':row['height'],
                    'kind':json.loads(row['metadata']).get('kind')}
+        if mode == 'download' and row['entrypoint'] == 'telegram' and instagram_reel(row['url']) and not request['kind']:
+            request['include_info'] = True
         env = {k:v for k,v in os.environ.items() if k in ('PATH','LANG','LC_ALL','SSL_CERT_FILE','SSL_CERT_DIR')}
         env.update(PYTHONUNBUFFERED='1',HOME=str(directory),XDG_CACHE_HOME=str(directory/'.cache'))
         process = subprocess.Popen([sys.executable,'-m','server.media'],cwd=ROOT,env=env,
@@ -798,12 +802,16 @@ class Service:
             self.store.require(row['user_id'])
             if row['cancelled']:
                 raise ValueError('Задание отменено.')
-            if not json.loads(row['metadata']):
+            info = json.loads(row['metadata'])
+            # A Telegram Reel can start downloading from the first successful
+            # lookup. The separate preflight would ask Instagram for it twice.
+            reel_download = (not info and row['entrypoint'] == 'telegram'
+                             and instagram_reel(row['url']))
+            if not info and not reel_download:
                 self.store.update(jid,state='inspecting')
                 info = self.media(row,'inspect')
                 self.store.update(jid,metadata=json.dumps(info),title=info.get('title','Видео')[:500])
                 row = self.store.job(jid)
-            info = json.loads(row['metadata'])
             if row['entrypoint'] == 'extension' and row['mode'] == 'auto':
                 # Inspect first: choose quality, size and delivery before downloading bytes.
                 return self.ask_choice(row)
@@ -813,6 +821,8 @@ class Service:
                 self.store.update(jid,state='downloading')
                 self.show_job(jid)
                 result = self.media(row,'download')
+                if reel_download:
+                    info = result['info']
                 directory = (self.files/jid).resolve()
                 paths = [Path(p) for p in result.get('paths', [result.get('path','')])]
                 for p in paths:
@@ -834,7 +844,8 @@ class Service:
                                     rate += result['media']['audioBitrate']/8
                                 estimate['bytes'] = round(rate*result['media']['duration'])
                     self.store.event(jid,row['user_id'],'media_verified',json.dumps(result['media']))
-                self.store.update(jid,files=json.dumps([str(p.relative_to(directory)) for p in paths]),size=size,metadata=json.dumps(info))
+                self.store.update(jid,files=json.dumps([str(p.relative_to(directory)) for p in paths]),
+                                  size=size,metadata=json.dumps(info),title=info.get('title',row['title'])[:500])
                 self.store.event(jid,row['user_id'],'download_ready',str(size))
                 row = self.store.job(jid)
             require_source_audio(info,row['format'],info.get('downloadedMedia') or {})
@@ -859,8 +870,10 @@ class Service:
             # Never include raw network exception strings (URLs can contain credentials).
             error = str(e)[:700] if isinstance(e,(ValueError,PermissionError)) else 'Не удалось завершить задание. Файл, если готов, сохранён на 24 часа.'
             state = 'cancelled' if row['cancelled'] else ('error' if isinstance(e,CompatibleError) else ('review' if row['state'] in ('uploading','delivering') else 'error'))
-            self.store.update(jid,state=state,error=error,source=None,expires=time.time()+86400)
-            if state=='cancelled' or not json.loads(row['files']):
+            keep_files = state!='cancelled' and bool(json.loads(row['files']))
+            self.store.update(jid,state=state,error=error,source=None,
+                              expires=time.time()+FILE_TTL if keep_files else None)
+            if not keep_files:
                 self.remove_files(row)
                 self.store.update(jid,files='[]')
             self.store.event(jid,row['user_id'],state,error)
@@ -872,6 +885,9 @@ class Service:
             rows = self.store.all("SELECT * FROM jobs WHERE expires<? AND state IN ('done','error','review','choice','cancelled')",(time.time(),))
             for row in rows:
                 self.remove_files(row)
+                if row['state'] in ('error','review','cancelled'):
+                    self.store.update(row['id'],source=None,files='[]',expires=None)
+                    continue
                 self.store.update(row['id'],state='expired',source=None,files='[]',expires=None)
                 self.store.event(row['id'],row['user_id'],'expired')
             db.execute('DELETE FROM tokens WHERE expires<?',(time.time(),))
